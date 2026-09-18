@@ -14,9 +14,9 @@
 - Sambhav Chordia | 
 - R.Pranav sai | 
 
-**Repo Link (Optional):** N/A
+**Repo Link (Optional): https://github.com/Rohith07d/Pragyan
 
-**Demo Link (Optional):** N/A
+**Demo Link (Optional): https://drive.google.com/drive/folders/1RnLTbnke1aCWC6nG3ZB52pnDoeopTC4v?usp=sharing
 
 ---
 
