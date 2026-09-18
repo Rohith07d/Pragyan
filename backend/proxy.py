@@ -585,16 +585,20 @@ async def bot_intake_endpoint(payload: IntakePayload):
 
 
 @app.post("/api/process")
+@app.post("/api/summarize")
+@app.post("/summarize")
+@app.post("/api/manual-transcript")
 async def process_pipeline_endpoint(payload: TranscriptPayload, background_tasks: BackgroundTasks):
     """
-    Full End-to-End Pipeline:
+    Full End-to-End Pipeline & Manual Testing Fallback:
     1. Mask raw transcript with Presidio -> generate bracketed tokens in RAM.
-    2. Zero-leak call to Featherless AI with ONLY masked text.
-    3. Re-hydrate structured JSON output locally using RAM map.
-    4. Persist action items in SQLite (without raw identities).
-    5. Dispatch personalized summaries via Webhook.
-    6. Aggressively wipe ephemeral RAM state.
-    7. Return dual-pane comparison payload (Cloud Payload vs. Re-hydrated Local View).
+    2. Side-by-side terminal X-Ray logging (RAW vs MASKED) for zero-leak audit.
+    3. Zero-leak call to Featherless AI with ONLY masked text.
+    4. Re-hydrate structured JSON output locally using RAM map.
+    5. Persist action items in SQLite (without raw identities).
+    6. Dispatch personalized summaries via Webhook.
+    7. Aggressively wipe ephemeral RAM state.
+    8. Return dual-pane comparison payload (Cloud Payload vs. Re-hydrated Local View).
     """
     raw_text = payload.transcript.strip()
     if not raw_text:
@@ -604,6 +608,18 @@ async def process_pipeline_endpoint(payload: TranscriptPayload, background_tasks
     mask_result = mask_transcript(raw_text)
     masked_text = mask_result["masked_text"]
     current_pii_map = get_ephemeral_ram()
+
+    # X-Ray Logging: Print side-by-side comparison to terminal for demo audits
+    print("\n" + "=" * 80)
+    print("🛡️  [X-RAY AUDIT] ZERO-LEAK PRESIDIO COMPARISON")
+    print("=" * 80)
+    print(f"RAW:    {raw_text}")
+    print("-" * 80)
+    print(f"MASKED: {masked_text}")
+    print("=" * 80 + "\n", flush=True)
+
+    logger.info(f"[X-RAY AUDIT] RAW: {raw_text[:120]}...")
+    logger.info(f"[X-RAY AUDIT] MASKED: {masked_text[:120]}...")
 
     # Step 2: Reasoning via Cloud LLM
     try:

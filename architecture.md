@@ -38,20 +38,34 @@ Ephemeral PII RAM Dictionary:
 *   **Database:** SQLite (strictly for long-term task tracking, NO transcripts saved).
 *   **External Integrations:** Discord/Slack Webhooks (Mocked enterprise communication).
 
-## 3. System Limitations & Boundaries
+## 3. API Routes & Networking
+*   `POST /api/intake`: Streams live meeting captions from Playwright intake scraper.
+*   `POST /api/process` (and alias `POST /api/summarize`): End-to-end zero-leak processing pipeline.
+*   `POST /api/mask`: Dedicated masking verification endpoint.
+*   `GET /api/tasks`: Read stored tokenized tasks from SQLite.
+*   `GET /api/audit-logs`: Real-time telemetry verifying zero PII leakage.
+*   `GET /api/webhooks/feed`: Telemetry stream of dispatched webhook briefs.
+*   **Live Testing Protocol:**
+    *   **Browser Bypass:** Playwright must launch Chromium with `--use-fake-ui-for-media-stream`, `--use-fake-device-for-media-stream`, and `--disable-blink-features=AutomationControlled` to auto-accept Meet microphone/camera prompts.
+    *   **DOM Interaction:** The bot must wait for the host to "Admit" it, then automatically locate and click the `[aria-label="Turn on captions"]` (CC) button.
+    *   **Caption Scraping:** The bot uses a DOM MutationObserver to stream new text nodes as they appear and sends them to the local proxy via `POST /intake`.
+    *   **X-Ray Logging:** The FastAPI server must console-log the `RAW:` text alongside the `MASKED:` text during the Presidio step to prove zero-leak compliance during the demo.
+    *   **Fallback:** Include a manual POST endpoint to accept hardcoded transcripts just in case the Google Meet DOM changes during the hackathon.
+
+## 4. System Limitations & Boundaries
 *   **Zero-Leak Enforcement:** NEVER send unmasked raw text to the Featherless AI API. All external HTTP requests containing transcript data MUST pass through the Presidio masking engine first.
 *   **Ephemeral State Wiping:** The PII RAM dictionary must be aggressively wiped immediately after the Webhook dispatch is complete. Do not persist identities in the SQLite database.
 *   **Authentication Ban:** DO NOT implement user authentication, SSO, JWTs, or complex OAuth flows. Assume a single-tenant local execution environment for the hackathon.
 *   **Edge Case Recovery:** If the LLM hallucinates or drops a bracketed token, the re-hydration loop must safely skip the missing key without crashing the FastAPI server.
 
-## 4. Repository Map & Delegation
+## 5. Repository Map & Delegation
 *   `architecture.md`: This file (The Layer 1 Source of Truth).
 *   `/backend/proxy.py`: The core FastAPI application, Presidio masking logic, SQLite DB connections, and Webhook dispatch routing.
 *   `/backend/bot.py`: Playwright headless DOM scraping script.
 *   `/backend/tasks.db`: Local SQLite database powering the Task Tracking Dashboard.
 *   `/frontend/`: Next.js workspace containing the dual-pane UI (Intercepted Cloud Payload vs. Re-hydrated Local View).
 
-## 5. Telemetry, Audit Logs & Run Orchestration
+## 6. Telemetry, Audit Logs & Run Orchestration
 *   `/api/audit-logs`: Exposes real-time verification logs verifying zero unmasked entity leakage in outbound cloud packets, payload character counts, and confirmation of RAM wiping.
 *   `/api/webhooks/feed`: In-memory log of dispatched webhook payloads enabling live inspection on the Next.js UI when third-party endpoints are mocked.
 *   `run.sh`: Unified root startup script to concurrently boot FastAPI proxy (port 8000) and Next.js frontend (port 3000).

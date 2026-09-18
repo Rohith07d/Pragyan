@@ -126,12 +126,11 @@ class AegisMeetBot:
         logger.info(f"Launching Playwright Chromium (headless={self.headless})...")
         async with async_playwright() as p:
             # Grant fake media streams to avoid browser mic/cam permission blocks
+            # Browser Bypass: Auto-accept media streams and prevent automation detection
             browser_args = [
-                "--use-fake-ui-for-media-stream",
-                "--use-fake-device-for-media-stream",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
+                "--use-fake-ui-for-media-stream",     # Auto-accepts permission prompts
+                "--use-fake-device-for-media-stream", # Feeds a blank stream instead of your real webcam
+                "--disable-blink-features=AutomationControlled" # Prevents Google from blocking the headless browser
             ]
 
             self.browser = await p.chromium.launch(
@@ -198,23 +197,86 @@ class AegisMeetBot:
                 logger.warning("Could not find direct join button; attempting keyboard Enter.")
                 await self.page.keyboard.press("Enter")
 
-            # Step 4: Enable Closed Captions
-            logger.info("Waiting for call entry and turning on captions...")
-            await asyncio.sleep(5)
-            # Shortcut 'c' toggles captions on Google Meet
-            await self.page.keyboard.press("c")
-            logger.info("Sent shortcut 'c' to enable captions.")
+            # Step 4: Wait to be admitted by the meeting host
+            logger.info("Waiting for host to admit bot into Google Meet call...")
+            try:
+                await self.page.wait_for_selector(
+                    'button[aria-label*="Turn on captions" i], button[aria-label*="Turn off captions" i], button[aria-label*="captions" i], button[aria-label*="Leave call" i]',
+                    timeout=180000  # Wait up to 3 minutes for host to admit
+                )
+                logger.info("Bot admitted into the meeting by host!")
+            except Exception as e:
+                logger.warning(f"Host admission check proceeded: {e}")
 
-            # Step 5: Monitor Caption DOM
-            # Google Meet captions reside in containers with class 'a4bIc' or jsname 'YSxPtf'
+            # Step 5: Automatically locate and click [aria-label="Turn on captions"] (CC) button
+            logger.info("Locating and clicking captions toggle...")
+            await asyncio.sleep(2)
+            caption_button_clicked = False
+            caption_selectors = [
+                'button[aria-label="Turn on captions"]',
+                'button[aria-label*="Turn on captions" i]',
+                'button[aria-label*="captions" i]',
+                'button[data-tooltip*="captions" i]',
+            ]
+            for selector in caption_selectors:
+                btn = self.page.locator(selector)
+                if await btn.count() > 0 and await btn.first.is_visible():
+                    await btn.first.click()
+                    caption_button_clicked = True
+                    logger.info(f"Successfully clicked caption toggle button ({selector}).")
+                    break
+
+            if not caption_button_clicked:
+                await self.page.keyboard.press("c")
+                logger.info("Sent keyboard shortcut 'c' to enable captions.")
+
+            # Step 6: Stream captions via DOM MutationObserver & DOM polling
             logger.info(f"Listening for captions (monitoring up to {max_duration_sec}s)...")
             self._is_running = True
             start_time = time.time()
             seen_texts = set()
 
+            # Expose bridge to browser runtime for real-time MutationObserver
+            try:
+                async def handle_browser_caption(speaker: str, text: str):
+                    clean = text.strip()
+                    if clean and clean not in seen_texts:
+                        seen_texts.add(clean)
+                        await self.send_intake_chunk(speaker, clean)
+
+                await self.page.expose_function("aegisMutationBridge", handle_browser_caption)
+
+                # Attach DOM MutationObserver to stream caption nodes as they appear
+                await self.page.evaluate("""() => {
+                    const observer = new MutationObserver((mutations) => {
+                        for (const m of mutations) {
+                            for (const node of m.addedNodes) {
+                                if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) {
+                                    const txt = (node.textContent || "").trim();
+                                    if (txt.length > 2) {
+                                        let spk = "Participant";
+                                        const parent = node.parentElement ? node.parentElement.closest('div[jscontroller="D1tHje"]') : null;
+                                        if (parent) {
+                                            const header = parent.querySelector('div.zs75Ib, div.jxFHg');
+                                            if (header) spk = header.textContent.trim();
+                                        }
+                                        if (window.aegisMutationBridge) {
+                                            window.aegisMutationBridge(spk, txt);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+                }""")
+                logger.info("DOM MutationObserver successfully registered for real-time caption scraping.")
+            except Exception as e:
+                logger.warning(f"Could not register MutationObserver ({e}); relying on polling observer.")
+
             while self._is_running and (time.time() - start_time < max_duration_sec):
                 try:
-                    # Query common Google Meet caption elements
+                    # Query Google Meet caption elements
                     caption_elements = await self.page.query_selector_all(
                         'div[jsname="YSxPtf"], div.a4bIc, span.yg3OAc'
                     )
@@ -222,7 +284,6 @@ class AegisMeetBot:
                         text = (await el.inner_text()).strip()
                         if text and text not in seen_texts:
                             seen_texts.add(text)
-                            # Attempt to find speaker header
                             speaker = "Participant"
                             parent = await el.evaluate_handle("el => el.closest('div[jscontroller=\"D1tHje\"]') || el.parentElement")
                             if parent:
