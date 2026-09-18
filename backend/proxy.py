@@ -1165,8 +1165,11 @@ class JoinMeetingPayload(BaseModel):
 class ScheduleMeetingPayload(BaseModel):
     meet_url: str = Field(..., description="Google Meet URL to join")
     join_time: str = Field(..., description="ISO 8601 datetime string for scheduled join")
-    bot_name: Optional[str] = "AegisMeet Notetaker"
-    duration_sec: Optional[int] = 3600
+    expected_participants: Optional[List[Any]] = Field(default_factory=list, description="Expected participant IDs or canonical names")
+    share_technical_summary: Optional[bool] = Field(True, description="Flag whether to share deep technical details")
+    meeting_purpose: Optional[str] = Field("AegisMeet Meeting", description="Meeting topic or purpose")
+    bot_name: Optional[str] = Field("AegisMeet Notetaker", description="Display name for bot")
+    duration_sec: Optional[int] = Field(3600, description="Max session duration in seconds")
 
 
 class TaskResponse(BaseModel):
@@ -1609,7 +1612,9 @@ async def join_meeting_endpoint(payload: JoinMeetingPayload):
 @app.post("/api/schedule")
 async def schedule_meeting_endpoint(payload: ScheduleMeetingPayload):
     """
-    Schedules the Playwright bot to join at a future ISO 8601 timestamp using APScheduler.
+    Lifespan Scheduler:
+    Accepts { meet_url, join_time, expected_participants, share_technical_summary, meeting_purpose }.
+    Persists meeting in relational SQLite Meetings table and uses APScheduler to trigger bot at join_time.
     """
     try:
         clean_time = payload.join_time.replace("Z", "+00:00")
@@ -1620,7 +1625,39 @@ async def schedule_meeting_endpoint(payload: ScheduleMeetingPayload):
             detail=f"Invalid join_time format ({e}). Expected ISO 8601 (e.g. 2026-09-18T19:30:00).",
         )
 
-    job_id = f"meet_job_{int(datetime.now().timestamp())}_{abs(hash(payload.meet_url)) % 10000}"
+    # Resolve expected_participants to user IDs
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    participant_ids = []
+    for p in (payload.expected_participants or []):
+        if isinstance(p, int):
+            participant_ids.append(p)
+        elif isinstance(p, str):
+            if p.isdigit():
+                participant_ids.append(int(p))
+            else:
+                cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (p.strip(),))
+                row = cursor.fetchone()
+                if row:
+                    participant_ids.append(row[0])
+
+    config_flags_dict = {
+        "expected_participants": participant_ids,
+        "share_technical_summary": payload.share_technical_summary if payload.share_technical_summary is not None else True,
+        "meet_url": payload.meet_url,
+    }
+    config_flags_json = json.dumps(config_flags_dict)
+
+    purpose_str = payload.meeting_purpose or "AegisMeet Sync Meeting"
+    cursor.execute(
+        "INSERT INTO Meetings (purpose, scheduled_time, config_flags) VALUES (?, ?, ?)",
+        (purpose_str, payload.join_time, config_flags_json),
+    )
+    conn.commit()
+    meeting_id = cursor.lastrowid
+    conn.close()
+
+    job_id = f"meet_job_{meeting_id}_{int(datetime.now().timestamp())}"
     scheduler.add_job(
         _execute_bot_session,
         trigger="date",
@@ -1629,13 +1666,18 @@ async def schedule_meeting_endpoint(payload: ScheduleMeetingPayload):
         id=job_id,
         replace_existing=True,
     )
-    logger.info(f"Scheduled job {job_id} for {payload.meet_url} at {target_dt.isoformat()}")
+    logger.info(f"Scheduled job {job_id} for meeting {meeting_id} ({payload.meet_url}) at {target_dt.isoformat()}")
 
     return {
         "status": "scheduled",
         "job_id": job_id,
+        "meeting_id": meeting_id,
         "meet_url": payload.meet_url,
+        "join_time": payload.join_time,
         "run_date": target_dt.isoformat(),
+        "meeting_purpose": purpose_str,
+        "expected_participants": participant_ids,
+        "share_technical_summary": payload.share_technical_summary,
         "message": f"Bot successfully scheduled to join at {target_dt.isoformat()}",
     }
 

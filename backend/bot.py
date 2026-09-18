@@ -178,6 +178,7 @@ class AegisMeetBot:
                         "--no-default-browser-check",
                         "--use-fake-ui-for-media-stream",
                         "--use-fake-device-for-media-stream",
+                        "--disable-blink-features=AutomationControlled",
                         "--lang=en-US",
                         "--accept-lang=en-US,en;q=0.9",
                     ]
@@ -400,6 +401,8 @@ class AegisMeetBot:
 
                 if not captions_already_on:
                     turn_on_selectors = [
+                        'button[aria-label="Turn on captions"]',
+                        '[aria-label="Turn on captions"]',
                         'button[aria-label*="Turn on captions" i]',
                         'button[aria-label*="ondertiteling inschakelen" i]',
                         'button[aria-label*="Enable captions" i]',
@@ -613,11 +616,28 @@ class AegisMeetBot:
                             }
                         }
 
-                        // Run continuous scanner every 300ms
-                        window.__AEGIS_SCAN_INTERVAL__ = setInterval(scanCaptions, 300);
+                        // Dedicated aria-live MutationObserver targeting live caption regions
+                        const ariaLiveObserver = new MutationObserver(() => scanCaptions());
 
-                        // Also trigger on DOM mutations for instant reactivity
-                        const obs = new MutationObserver(() => scanCaptions());
+                        function attachAriaLiveListeners() {
+                            const ariaLiveNodes = document.querySelectorAll(
+                                '[aria-live="polite"], [aria-live="assertive"], [role="region"][aria-label*="Captions" i], div[jsname="YSxPtf"], div.a4bIc'
+                            );
+                            ariaLiveNodes.forEach(node => {
+                                try {
+                                    ariaLiveObserver.observe(node, { childList: true, subtree: true, characterData: true });
+                                } catch (e) {}
+                            });
+                        }
+
+                        attachAriaLiveListeners();
+
+                        // Continuous scanner and body mutation observer
+                        window.__AEGIS_SCAN_INTERVAL__ = setInterval(scanCaptions, 300);
+                        const obs = new MutationObserver(() => {
+                            attachAriaLiveListeners();
+                            scanCaptions();
+                        });
                         obs.observe(document.body, { childList: true, subtree: true, characterData: true });
                         window.__AEGIS_OBSERVER__ = obs;
 
