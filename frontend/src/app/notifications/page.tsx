@@ -23,7 +23,7 @@ export default function NotificationsPage() {
     {
       id: 3,
       title: "Phonetic Aliases Auto-Generated",
-      desc: "Autonomous generator added 15 phonetic misspellings for canonical participants.",
+      desc: "Autonomous generator added 100 phonetic misspellings for canonical participants.",
       time: "3h ago",
       type: "check",
     },

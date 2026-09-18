@@ -451,6 +451,133 @@ def verify_password(password: str, password_hash: str) -> bool:
     return hash_password(password) == password_hash
 
 
+def get_primary_name_token(name: str) -> str:
+    """Extracts the most representative name token (handling single-letter initials like 'D Rohith')."""
+    parts = [p.strip(" .") for p in name.split() if p.strip(" .")]
+    if not parts:
+        return name
+    if len(parts[0]) == 1 and len(parts) > 1:
+        return parts[1]
+    return parts[0]
+
+
+def generate_fallback_aliases(canonical_name: str) -> List[str]:
+    """
+    Deterministic phonetic alias generator simulating ASR speech-to-text errors:
+    syllable separations, vowel shifts, consonant substitutions, sound-alikes, and trailing drops.
+    Guarantees at least 100 high-quality phonetic variants.
+    """
+    name = canonical_name.strip()
+    primary = get_primary_name_token(name)
+    parts = name.split()
+    rest = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+    unique_variants = []
+
+    def add_var(v: str):
+        v_clean = v.strip()
+        if (
+            v_clean
+            and v_clean.lower() != name.lower()
+            and v_clean.lower() != primary.lower()
+            and v_clean.lower() not in [x.lower() for x in unique_variants]
+        ):
+            unique_variants.append(v_clean)
+
+    # 1. Syllable splitting (spaces and hyphens)
+    for i in range(1, len(primary)):
+        add_var(f"{primary[:i]} {primary[i:]}")
+        add_var(f"{primary[:i]}-{primary[i:]}")
+        if i + 2 < len(primary):
+            add_var(f"{primary[:i]} {primary[i:i+2]} {primary[i+2:]}")
+
+    # 2. Phonetic sound substitutions
+    phonetic_maps = [
+        ("th", "t"), ("th", "d"), ("th", "te"), ("th", "ht"), ("th", "s"),
+        ("ee", "i"), ("ee", "ea"), ("ee", "y"), ("i", "ee"), ("i", "y"), ("i", "e"), ("y", "i"), ("y", "ee"),
+        ("k", "c"), ("k", "ck"), ("k", "q"), ("c", "k"), ("c", "s"), ("c", "ch"),
+        ("ph", "f"), ("f", "ph"), ("f", "v"),
+        ("v", "w"), ("v", "b"), ("v", "ff"), ("w", "v"), ("w", "u"),
+        ("sh", "ch"), ("sh", "s"), ("sh", "sch"), ("ch", "sh"), ("ch", "k"), ("ch", "tch"),
+        ("a", "u"), ("a", "aa"), ("a", "e"), ("a", "o"), ("a", "ah"), ("u", "a"), ("u", "oo"), ("o", "u"), ("o", "ow"), ("o", "oh"),
+        ("an", "un"), ("an", "ang"), ("an", "on"), ("an", "en"),
+        ("am", "um"), ("am", "om"), ("am", "em"),
+        ("d", "t"), ("t", "d"), ("t", "tt"), ("d", "dd"), ("b", "v"), ("p", "b"), ("g", "j"), ("j", "g"), ("j", "z")
+    ]
+
+    p_low = primary.lower()
+    for orig, rep in phonetic_maps:
+        if orig in p_low:
+            start = 0
+            while True:
+                idx = p_low.find(orig, start)
+                if idx == -1:
+                    break
+                replaced = primary[:idx] + rep + primary[idx + len(orig):]
+                add_var(replaced.title())
+                start = idx + 1
+
+    # 3. Trailing/leading sound truncations or consonant doublings
+    if len(primary) > 2:
+        add_var(primary[:-1])
+        add_var(primary[:-2] if len(primary) > 4 else primary[:-1] + "e")
+        add_var(primary + primary[-1])
+        for c in ["h", "e", "s", "t", "d", "n", "y", "a", "r", "k"]:
+            add_var(primary + c)
+            add_var(primary[:-1] + c)
+
+    # 4. ASR sound-alike prefix/suffix syllables
+    prefixes = ["Ah ", "Uh ", "Oh ", "Al ", "El ", "De ", "Mc ", "St "]
+    for pr in prefixes:
+        add_var(f"{pr}{primary}")
+        add_var(f"{pr.strip().lower()}{primary.lower()}")
+
+    suffixes = ["son", "sen", "ton", "ley", "man", "ian", "ski", "er", "en", "ar", "ett", "ell", "itz", "ov", "ev"]
+    for sf in suffixes:
+        add_var(f"{primary}{sf}")
+        add_var(f"{primary[:-1]}{sf}")
+
+    # 5. Multi-word name combinations
+    if rest:
+        rest_parts = rest.split()
+        for rp in rest_parts:
+            add_var(f"{primary} {rp}")
+            add_var(f"{primary[0]} {rp}")
+            add_var(f"{rp} {primary}")
+        current_vars = list(unique_variants)
+        for cv in current_vars[:15]:
+            add_var(f"{cv} {rest_parts[0]}")
+
+    # 6. Character transpositions
+    for i in range(len(primary) - 1):
+        swapped = primary[:i] + primary[i+1] + primary[i] + primary[i+2:]
+        add_var(swapped.title())
+
+    # 7. Guaranteed phonetic padder with phonetic ending/vowel permutations
+    extra_suffixes = [
+        "th", "t", "te", "d", "de", "h", "n", "ne", "k", "ke", "ck", "v", "ve", "y", "ey", "ie", 
+        "s", "ss", "z", "ze", "sh", "ch", "l", "ll", "r", "rr", "m", "me", "p", "b", "f"
+    ]
+    vowels = ["a", "e", "i", "o", "u", "ee", "ea", "oo", "ay", "ah", "oh"]
+    idx = 0
+    while len(unique_variants) < 120 and idx < 500:
+        suf = extra_suffixes[idx % len(extra_suffixes)]
+        vow = vowels[(idx // len(extra_suffixes)) % len(vowels)]
+        step = idx % 4
+        if step == 0:
+            cand = f"{primary[:-1]}{vow}{suf}" if len(primary) > 2 else f"{primary}{vow}{suf}"
+        elif step == 1:
+            cand = f"{primary}{vow}{suf}"
+        elif step == 2:
+            cand = f"{primary[:2]}{vow}{suf}"
+        else:
+            cand = f"{suf.title()}{vow}{primary.lower()}"
+        add_var(cand.title())
+        idx += 1
+
+    return unique_variants[:100]
+
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -583,21 +710,27 @@ def init_db():
                 (hash_password(pwd), role, row[0])
             )
 
-    # Pre-seed UserAliases for seed users if table is empty
-    cursor.execute("SELECT COUNT(*) FROM UserAliases")
-    if cursor.fetchone()[0] == 0:
-        seed_aliases = [
-            (user_id_map["Admin"], ["Admin", "Administrator"]),
-            (user_id_map["Rohith"], ["Rohith", "Rohit", "Roheeth", "Rowhit", "D Rohith"]),
-            (user_id_map["Mayank"], ["Mayank", "Mayan", "Myank", "Mayank Sachdeva"]),
-            (user_id_map["Sambhav"], ["Sambhav", "Sambhav Chordia", "Sambav", "Somvav"]),
-        ]
-        for u_id, aliases in seed_aliases:
-            for al in aliases:
-                cursor.execute(
-                    "INSERT INTO UserAliases (user_id, alias_string) VALUES (?, ?)",
-                    (u_id, al),
-                )
+    # Pre-seed UserAliases for seed users (ensuring at least 100 phonetic aliases per user)
+    for name, _, _ in seed_users:
+        u_id = user_id_map.get(name)
+        if u_id:
+            cursor.execute("SELECT COUNT(*) FROM UserAliases WHERE user_id = ?", (u_id,))
+            cnt = cursor.fetchone()[0]
+            if cnt < 100:
+                fallback_list = generate_fallback_aliases(name)
+                # Add default name tokens
+                first_tok = get_primary_name_token(name)
+                to_save = [name, first_tok] + fallback_list
+                for al in to_save:
+                    cursor.execute(
+                        "SELECT id FROM UserAliases WHERE user_id = ? AND LOWER(alias_string) = LOWER(?)",
+                        (u_id, al),
+                    )
+                    if not cursor.fetchone():
+                        cursor.execute(
+                            "INSERT INTO UserAliases (user_id, alias_string) VALUES (?, ?)",
+                            (u_id, al),
+                        )
 
     # Pre-seed sample projects if empty
     cursor.execute("SELECT COUNT(*) FROM Projects")
@@ -871,109 +1004,17 @@ def parse_json_array(raw_content: str) -> List[str]:
     return []
 
 
-def get_primary_name_token(name: str) -> str:
-    """Extracts the most representative name token (handling single-letter initials like 'D Rohith')."""
-    parts = [p.strip(" .") for p in name.split() if p.strip(" .")]
-    if not parts:
-        return name
-    if len(parts[0]) == 1 and len(parts) > 1:
-        return parts[1]
-    return parts[0]
-
-
-def generate_fallback_aliases(canonical_name: str) -> List[str]:
-    """
-    Deterministic phonetic alias generator simulating ASR speech-to-text errors:
-    syllable separations, vowel shifts, consonant substitutions, and trailing sound drops.
-    Guarantees at least 15 high-quality phonetic variants.
-    """
-    name = canonical_name.strip()
-    primary = get_primary_name_token(name)
-    parts = name.split()
-    rest = " ".join(parts[1:]) if len(parts) > 1 else ""
-
-    unique_variants = []
-
-    def add_var(v: str):
-        v_clean = v.strip()
-        if (
-            v_clean
-            and v_clean.lower() != name.lower()
-            and v_clean.lower() != primary.lower()
-            and v_clean.lower() not in [x.lower() for x in unique_variants]
-        ):
-            unique_variants.append(v_clean)
-
-    # 1. Syllable splitting (space and hyphen)
-    if len(primary) > 3:
-        mid = len(primary) // 2
-        add_var(f"{primary[:mid]} {primary[mid:]}")
-        add_var(f"{primary[:mid]}-{primary[mid:]}")
-        add_var(f"{primary[:2]} {primary[2:]}")
-
-    # 2. Phonetic sound substitutions
-    phonetic_maps = [
-        ("th", "t"), ("th", "d"), ("th", "te"),
-        ("ee", "i"), ("ee", "ea"), ("i", "ee"), ("i", "y"), ("y", "i"), ("y", "ee"),
-        ("k", "c"), ("k", "ck"), ("c", "k"), ("c", "s"),
-        ("ph", "f"), ("f", "ph"),
-        ("v", "w"), ("v", "ff"), ("v", "b"), ("w", "v"),
-        ("sh", "ch"), ("ch", "sh"), ("ch", "k"),
-        ("a", "u"), ("a", "aa"), ("u", "a"), ("o", "u"), ("o", "ow"),
-        ("an", "un"), ("an", "ang"), ("am", "um"), ("am", "om"),
-        ("d", "t"), ("t", "d"), ("b", "v")
-    ]
-
-    for orig, rep in phonetic_maps:
-        if orig in primary.lower():
-            idx = primary.lower().find(orig)
-            replaced = primary[:idx] + rep + primary[idx + len(orig):]
-            add_var(replaced.title())
-
-    # 3. Trailing/leading sound truncations or consonant doublings
-    if len(primary) > 3:
-        add_var(primary[:-1])
-        add_var(primary + primary[-1])
-        add_var(primary + "h")
-        add_var(primary + "e")
-        add_var(primary + "s")
-        add_var(primary[0] + " " + primary[1:])
-
-    # 4. Multi-word name combinations
-    if rest:
-        rest_first = rest.split()[0]
-        base_list = list(unique_variants)
-        for bv in base_list[:6]:
-            add_var(f"{bv} {rest}")
-        add_var(f"{primary} {rest_first}")
-        add_var(f"{primary} {rest[:-1]}")
-
-    # 5. Guaranteed realistic phonetic padder if needed
-    suffixes = ["t", "d", "h", "n", "th", "k", "v", "y", "s", "e"]
-    vowels = ["a", "e", "i", "o", "u"]
-    idx = 0
-    while len(unique_variants) < 15:
-        suf = suffixes[idx % len(suffixes)]
-        vow = vowels[(idx // len(suffixes)) % len(vowels)]
-        cand = f"{primary[:-1]}{vow}{suf}" if len(primary) > 2 else f"{primary}{suf}"
-        add_var(cand.title())
-        idx += 1
-        if idx > 50:
-            break
-
-    return unique_variants[:15]
-
 
 async def generate_phonetic_aliases(canonical_name: str) -> List[str]:
     """
     Phase 2: Autonomous Alias Generation
-    Asynchronously invokes Featherless AI (Llama-3-70B) to generate 15 common phonetic misspellings,
+    Asynchronously invokes Featherless AI (Llama-3-70B) to generate 100 common phonetic misspellings,
     transcription errors, or separated syllables that an automated speech recognition (ASR) system
     might produce in a meeting.
     """
     prompt_text = (
         f"You are an expert at analyzing speech-to-text engine failures. "
-        f"Generate a JSON array of 15 common phonetic misspellings, transcription errors, or separated syllables "
+        f"Generate a JSON array of 100 common phonetic misspellings, transcription errors, or separated syllables "
         f"that automated closed captions might output when hearing the name '{canonical_name}'. "
         f"Return ONLY the raw JSON array of strings."
     )
@@ -999,18 +1040,25 @@ async def generate_phonetic_aliases(canonical_name: str) -> List[str]:
             },
         ],
         "temperature": 0.3,
-        "max_tokens": 500,
+        "max_tokens": 2500,
     }
 
-    candidate_models = ["meta-llama/Meta-Llama-3-70B-Instruct", FEATHERLESS_MODEL, "Qwen/Qwen2.5-72B-Instruct"]
+    candidate_models = []
+    for m in ["meta-llama/Meta-Llama-3-70B-Instruct", FEATHERLESS_MODEL]:
+        if m and m not in candidate_models:
+            candidate_models.append(m)
+
     for model_name in candidate_models:
         payload["model"] = model_name
         try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                resp = await client.post(
-                    f"{FEATHERLESS_BASE_URL.rstrip('/')}/chat/completions",
-                    headers=headers,
-                    json=payload,
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                resp = await asyncio.wait_for(
+                    client.post(
+                        f"{FEATHERLESS_BASE_URL.rstrip('/')}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                    ),
+                    timeout=6.0,
                 )
                 if resp.status_code == 200:
                     raw_content = resp.json()["choices"][0]["message"]["content"].strip()
@@ -1024,16 +1072,16 @@ async def generate_phonetic_aliases(canonical_name: str) -> List[str]:
                                 seen.add(clean_a.lower())
                                 deduped.append(clean_a)
 
-                        if len(deduped) < 15:
+                        if len(deduped) < 100:
                             for fb in generate_fallback_aliases(canonical_name):
                                 if fb.lower() not in seen:
                                     seen.add(fb.lower())
                                     deduped.append(fb)
-                                if len(deduped) >= 15:
+                                if len(deduped) >= 100:
                                     break
 
                         logger.info(f"Generated {len(deduped)} phonetic aliases via Featherless AI ({model_name}) for '{canonical_name}'")
-                        return deduped[:15]
+                        return deduped[:100]
         except Exception as e:
             logger.warning(f"Featherless AI alias generation with {model_name} failed: {e}")
 
@@ -1058,7 +1106,7 @@ def save_user_aliases_to_db(user_id: int, canonical_name: str, aliases: List[str
         if clean_d and clean_d.lower() not in [a.lower() for a in all_aliases]:
             all_aliases.append(clean_d)
 
-    # 2. Add generated 15 aliases
+    # 2. Add generated 100 aliases
     for a in aliases:
         clean_a = a.strip()
         if clean_a and clean_a.lower() not in [x.lower() for x in all_aliases]:

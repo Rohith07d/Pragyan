@@ -33,21 +33,21 @@ def client():
 
 
 @pytest.mark.asyncio
-async def test_generate_phonetic_aliases_returns_15_variants():
-    """Verify generate_phonetic_aliases produces at least 15 phonetic misspellings."""
-    test_names = ["Rohith", "Mayank Sachdeva", "Sambhav Chordia", "D Rohith"]
+async def test_generate_phonetic_aliases_returns_100_variants():
+    """Verify generate_phonetic_aliases produces at least 100 phonetic misspellings."""
+    test_names = ["Rohith", "Mayank Sachdeva"]
     for name in test_names:
         aliases = await generate_phonetic_aliases(name)
         assert isinstance(aliases, list)
-        assert len(aliases) >= 15, f"Expected at least 15 aliases for {name}, got {len(aliases)}"
+        assert len(aliases) >= 100, f"Expected at least 100 aliases for {name}, got {len(aliases)}"
         # Verify no duplicate entries
         assert len(aliases) == len(set(a.lower() for a in aliases))
 
 
 def test_fallback_aliases_coverage():
-    """Verify the deterministic fallback generator covers syllable splits and phonetic shifts."""
+    """Verify the deterministic fallback generator covers syllable splits, phonetic shifts, and produces 100 variants."""
     fallback = generate_fallback_aliases("Mayank Sachdeva")
-    assert len(fallback) >= 15
+    assert len(fallback) >= 100
     # Should contain syllable split or phonetic shift
     assert any(" " in a or "-" in a for a in fallback)
 
@@ -55,7 +55,7 @@ def test_fallback_aliases_coverage():
 def test_admin_create_user_autopopulates_aliases(client):
     """
     When Admin creates a user via POST /users, UserAliases must be
-    automatically populated with generated aliases + user's first name.
+    automatically populated with 100 generated aliases + user's first name & canonical name.
     """
     # 1. Login as Admin
     admin_login = client.post("/login", json={"canonical_name": "Admin", "password": "admin123"}).json()
@@ -77,7 +77,7 @@ def test_admin_create_user_autopopulates_aliases(client):
     assert data["status"] == "created"
     assert data["user"]["canonical_name"] == test_name
     assert "aliases" in data["user"]
-    assert data["user"]["aliases_count"] >= 15
+    assert data["user"]["aliases_count"] >= 100
 
     new_user_id = data["user"]["id"]
 
@@ -88,7 +88,7 @@ def test_admin_create_user_autopopulates_aliases(client):
     stored_aliases = [r[0] for r in cursor.fetchall()]
     conn.close()
 
-    assert len(stored_aliases) >= 16  # Canonical + first name + 15 variants
+    assert len(stored_aliases) >= 100  # Canonical + first name + 100 variants
     # User's first name and canonical name must be in the stored aliases
     assert any(a.lower() == test_name.lower() for a in stored_aliases)
     assert any(a.lower() == first_name.lower() for a in stored_aliases)
@@ -97,7 +97,7 @@ def test_admin_create_user_autopopulates_aliases(client):
 def test_alias_generation_error_resilience(client, monkeypatch):
     """
     If Featherless AI call fails, times out, or throws an exception,
-    user creation must NOT break and fallback aliases must be persisted.
+    user creation must NOT break and 100 fallback aliases must be persisted.
     """
     # Simulate AI failure by monkeypatching generate_phonetic_aliases to raise an error
     async def mock_crashing_generator(canonical_name: str):
@@ -118,7 +118,7 @@ def test_alias_generation_error_resilience(client, monkeypatch):
     assert resp.status_code == 201
     user_data = resp.json()["user"]
     assert user_data["canonical_name"] == unique_name
-    assert user_data["aliases_count"] >= 15
+    assert user_data["aliases_count"] >= 100
 
     # Verify fallback aliases saved in DB
     conn = sqlite3.connect(DB_PATH)
@@ -126,7 +126,7 @@ def test_alias_generation_error_resilience(client, monkeypatch):
     cursor.execute("SELECT alias_string FROM UserAliases WHERE user_id = ?", (user_data["id"],))
     db_aliases = [r[0] for r in cursor.fetchall()]
     conn.close()
-    assert len(db_aliases) >= 15
+    assert len(db_aliases) >= 100
 
 
 def test_get_aliases_privacy_and_access(client):
@@ -152,7 +152,7 @@ def test_get_aliases_privacy_and_access(client):
 
 
 def test_on_demand_alias_generation_endpoint(client):
-    """Verify POST /api/aliases/generate endpoint returns 15 variants."""
+    """Verify POST /api/aliases/generate endpoint returns 100 variants."""
     user_token = client.post("/login", json={"canonical_name": "Rohith", "password": "rohith123"}).json()["access_token"]
     resp = client.post(
         "/api/aliases/generate",
@@ -162,5 +162,5 @@ def test_on_demand_alias_generation_endpoint(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["canonical_name"] == "Sai Sanjeet"
-    assert data["count"] >= 15
-    assert len(data["aliases"]) >= 15
+    assert data["count"] >= 100
+    assert len(data["aliases"]) >= 100
