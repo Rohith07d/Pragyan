@@ -18,6 +18,7 @@ import {
   Paperclip,
   Smile,
   MoreVertical,
+  CheckCheck,
 } from "lucide-react";
 
 interface Message {
@@ -192,9 +193,63 @@ export default function MessagesPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const markChannelAsRead = (channelId: string) => {
+    setChannels((prev) => {
+      const updated = prev.map((c) => (c.id === channelId ? { ...c, unread: 0 } : c));
+      const newTotal = updated.reduce((sum, c) => sum + c.unread, 0);
+      try {
+        localStorage.setItem("aegis_unread_messages_count", String(newTotal));
+        const unreadMap = updated.reduce((acc, c) => ({ ...acc, [c.id]: c.unread }), {});
+        localStorage.setItem("aegis_channel_unread_map", JSON.stringify(unreadMap));
+        window.dispatchEvent(new CustomEvent("aegis_messages_updated", { detail: { unread: newTotal } }));
+      } catch {}
+      return updated;
+    });
+  };
+
+  const handleMarkAllRead = () => {
+    setChannels((prev) => {
+      const updated = prev.map((c) => ({ ...c, unread: 0 }));
+      try {
+        localStorage.setItem("aegis_unread_messages_count", "0");
+        const unreadMap = updated.reduce((acc, c) => ({ ...acc, [c.id]: 0 }), {});
+        localStorage.setItem("aegis_channel_unread_map", JSON.stringify(unreadMap));
+        window.dispatchEvent(new CustomEvent("aegis_messages_updated", { detail: { unread: 0 } }));
+      } catch {}
+      return updated;
+    });
+  };
+
+  const handleSelectChannel = (channelId: string) => {
+    setActiveChannelId(channelId);
+    markChannelAsRead(channelId);
+  };
+
   useEffect(() => {
     const user = getCurrentUser();
     setCurrentUser(user);
+
+    // Read saved channel unread map if available
+    try {
+      const savedMap = localStorage.getItem("aegis_channel_unread_map");
+      if (savedMap) {
+        const parsed = JSON.parse(savedMap);
+        setChannels((prev) => {
+          const updated = prev.map((c) => ({
+            ...c,
+            unread: c.id === activeChannelId ? 0 : (parsed[c.id] ?? c.unread),
+          }));
+          const total = updated.reduce((s, c) => s + c.unread, 0);
+          localStorage.setItem("aegis_unread_messages_count", String(total));
+          window.dispatchEvent(new CustomEvent("aegis_messages_updated", { detail: { unread: total } }));
+          return updated;
+        });
+        return;
+      }
+    } catch {}
+
+    // First load: Mark initially opened channel (meeting-briefs) as read!
+    markChannelAsRead(activeChannelId);
   }, []);
 
   // Poll backend for fresh channel messages every 3 seconds so other deployed users' messages appear live
@@ -326,11 +381,21 @@ export default function MessagesPage() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs text-gray-500 font-medium">Enterprise Communications</p>
-              <h1 className="text-2xl font-bold text-gray-900 tracking-tight mt-0.5 flex items-center gap-2.5">
+              <h1 className="text-2xl font-bold text-gray-900 tracking-tight mt-0.5 flex items-center gap-2.5 flex-wrap">
                 <span>Team Messages & Briefs</span>
                 <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-black text-white">
-                  {totalUnread} New
+                  {totalUnread > 0 ? `${totalUnread} New` : "All Caught Up"}
                 </span>
+                {totalUnread > 0 && (
+                  <button
+                    onClick={handleMarkAllRead}
+                    className="text-xs text-gray-700 hover:text-black font-semibold flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 border border-gray-200 transition-colors cursor-pointer shadow-2xs"
+                    title="Mark all messages as read across all channels"
+                  >
+                    <CheckCheck className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Mark all as read</span>
+                  </button>
+                )}
               </h1>
             </div>
 
@@ -371,14 +436,7 @@ export default function MessagesPage() {
                         return (
                           <button
                             key={c.id}
-                            onClick={() => {
-                              setActiveChannelId(c.id);
-                              setChannels((prev) =>
-                                prev.map((item) =>
-                                  item.id === c.id ? { ...item, unread: 0 } : item
-                                )
-                              );
-                            }}
+                            onClick={() => handleSelectChannel(c.id)}
                             className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-all cursor-pointer ${
                               isActive
                                 ? "bg-zinc-800 text-white font-semibold"
@@ -414,14 +472,7 @@ export default function MessagesPage() {
                         return (
                           <button
                             key={c.id}
-                            onClick={() => {
-                              setActiveChannelId(c.id);
-                              setChannels((prev) =>
-                                prev.map((item) =>
-                                  item.id === c.id ? { ...item, unread: 0 } : item
-                                )
-                              );
-                            }}
+                            onClick={() => handleSelectChannel(c.id)}
                             className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-all cursor-pointer ${
                               isActive
                                 ? "bg-zinc-800 text-white font-semibold"

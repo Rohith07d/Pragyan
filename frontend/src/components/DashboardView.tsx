@@ -77,6 +77,22 @@ export default function DashboardView() {
     setUser(currentUser);
     loadData(currentUser);
 
+    // Initial unread count load
+    const savedUnread = localStorage.getItem("aegis_unread_messages_count");
+    if (savedUnread !== null) {
+      setUnreadMessagesCount(parseInt(savedUnread, 10) || 0);
+    }
+
+    const handleMessagesUpdated = (e: any) => {
+      const val = e?.detail?.unread ?? localStorage.getItem("aegis_unread_messages_count");
+      if (val !== null && val !== undefined) {
+        setUnreadMessagesCount(parseInt(String(val), 10) || 0);
+      }
+    };
+
+    window.addEventListener("aegis_messages_updated", handleMessagesUpdated);
+    window.addEventListener("storage", handleMessagesUpdated);
+
     const interval = setInterval(async () => {
       try {
         const status = await fetchBotStatus();
@@ -86,7 +102,11 @@ export default function DashboardView() {
       }
     }, 5000);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("aegis_messages_updated", handleMessagesUpdated);
+      window.removeEventListener("storage", handleMessagesUpdated);
+    };
   }, [router]);
 
   const loadData = async (activeUser?: AuthUser | null, filterName: string = "all") => {

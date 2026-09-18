@@ -1,5 +1,6 @@
 "use client";
 
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -15,18 +16,45 @@ import {
 } from "lucide-react";
 import { logoutUser } from "@/lib/api";
 
-const navItems = [
-  { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { name: "My Tasks", href: "/tasks", icon: CheckSquare },
-  { name: "Projects", href: "/projects", icon: Folder },
-  { name: "Meetings", href: "/meetings", icon: Video },
-  { name: "Messages", href: "/messages", icon: Mail, badge: "34" },
-  { name: "Notifications", href: "/notifications", icon: Bell, badge: "2" },
-  { name: "Settings", href: "/settings", icon: Settings },
-];
-
 export default function Sidebar() {
   const pathname = usePathname();
+  const [messagesUnread, setMessagesUnread] = useState<number>(34);
+
+  useEffect(() => {
+    const saved = localStorage.getItem("aegis_unread_messages_count");
+    if (saved !== null) {
+      setMessagesUnread(parseInt(saved, 10) || 0);
+    }
+
+    const handleUpdate = (e: any) => {
+      const val = e?.detail?.unread ?? localStorage.getItem("aegis_unread_messages_count");
+      if (val !== null && val !== undefined) {
+        setMessagesUnread(parseInt(String(val), 10) || 0);
+      }
+    };
+
+    window.addEventListener("aegis_messages_updated", handleUpdate);
+    window.addEventListener("storage", handleUpdate);
+    return () => {
+      window.removeEventListener("aegis_messages_updated", handleUpdate);
+      window.removeEventListener("storage", handleUpdate);
+    };
+  }, []);
+
+  const navItems = [
+    { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+    { name: "My Tasks", href: "/tasks", icon: CheckSquare },
+    { name: "Projects", href: "/projects", icon: Folder },
+    { name: "Meetings", href: "/meetings", icon: Video },
+    {
+      name: "Messages",
+      href: "/messages",
+      icon: Mail,
+      badge: messagesUnread > 0 ? String(messagesUnread) : undefined,
+    },
+    { name: "Notifications", href: "/notifications", icon: Bell, badge: "2" },
+    { name: "Settings", href: "/settings", icon: Settings },
+  ];
 
   return (
     <aside className="w-56 bg-white border-r border-gray-200 flex flex-col justify-between h-screen sticky top-0 px-4 py-6 z-20 select-none">
