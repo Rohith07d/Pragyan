@@ -8,11 +8,11 @@
 
 **Team Members:**
 
-- Mayank Sachdeva | Agent Whisperer & Backend Developer
-- D Rohith | Frontend Developer
-- Bachu Sai Sanjeet | Integrations Engineer
-- Sambhav Chordia | UI/UX Designer
-- R.Pranav sai | Data Engineer
+- Mayank Sachdeva |
+- D Rohith | 
+- Bachu Sai Sanjeet |
+- Sambhav Chordia | 
+- R.Pranav sai | 
 
 **Repo Link (Optional):** N/A
 
