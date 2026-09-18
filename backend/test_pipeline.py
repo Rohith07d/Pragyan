@@ -46,7 +46,9 @@ def test_process_pipeline_zero_leak_and_wipe():
     assert ram_status["active_tokens_count"] == 0
 
 def test_tasks_endpoint():
-    response = client.get("/api/tasks")
+    login_resp = client.post("/login", json={"canonical_name": "Admin", "password": "admin123"})
+    token = login_resp.json()["access_token"]
+    response = client.get("/api/tasks", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200
     tasks = response.json()
     assert isinstance(tasks, list)

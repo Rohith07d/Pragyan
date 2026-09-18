@@ -19,15 +19,17 @@ import logging
 import time
 import hashlib
 import uuid
-from datetime import datetime, timezone
+import jwt
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from fastapi import FastAPI, HTTPException, status, BackgroundTasks
+from fastapi import FastAPI, HTTPException, status, BackgroundTasks, Depends
 from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 import httpx
 from dotenv import load_dotenv
@@ -261,7 +263,7 @@ def rehydrate_payload(payload: Dict[str, Any], pii_map: Dict[str, str]) -> Dict[
 
 
 # ==============================================================================
-# SQLite Database Setup (Persistent Tasks & User Authentication)
+# SQLite Relational Database Setup (Users, Projects, Meetings, Tasks, UserAliases)
 # ==============================================================================
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.strip().encode("utf-8")).hexdigest()
@@ -274,63 +276,195 @@ def verify_password(password: str, password_hash: str) -> bool:
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task TEXT NOT NULL,
-            assignee TEXT,
-            assignee_token TEXT,
-            deadline TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            name TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'user',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    # Check if assignee column exists for existing DBs
-    cursor.execute("PRAGMA table_info(tasks)")
-    columns = [row[1] for row in cursor.fetchall()]
-    if "assignee" not in columns:
+    cursor.execute("PRAGMA foreign_keys = ON;")
+
+    # 1. Users (id, canonical_name, password_hash, role)
+    cursor.execute("PRAGMA table_info(Users)")
+    user_cols = [row[1] for row in cursor.fetchall()]
+    if not user_cols:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS Users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_name TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user'
+            )
+        """)
+    elif "canonical_name" not in user_cols or "email" in user_cols:
+        cursor.execute("PRAGMA foreign_keys = OFF;")
         try:
-            cursor.execute("ALTER TABLE tasks ADD COLUMN assignee TEXT")
+            cursor.execute("SELECT id, coalesce(canonical_name, name, 'User'), password_hash, role FROM Users")
+            existing_users = cursor.fetchall()
         except Exception:
-            pass
+            existing_users = []
+        cursor.execute("DROP TABLE IF EXISTS Users")
+        cursor.execute("""
+            CREATE TABLE Users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_name TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user'
+            )
+        """)
+        if existing_users:
+            cursor.executemany(
+                "INSERT INTO Users (id, canonical_name, password_hash, role) VALUES (?, ?, ?, ?)",
+                existing_users
+            )
+        cursor.execute("PRAGMA foreign_keys = ON;")
+
+    # 2. Projects (id, name)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL
+        )
+    """)
+
+    # 3. Meetings (id, purpose, scheduled_time, config_flags)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Meetings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purpose TEXT,
+            scheduled_time TEXT,
+            config_flags TEXT
+        )
+    """)
+
+    # 4. Tasks (id, meeting_id, assignee_id, task, deadline)
+    cursor.execute("PRAGMA table_info(Tasks)")
+    task_cols = [row[1] for row in cursor.fetchall()]
+    if not task_cols:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS Tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id INTEGER REFERENCES Meetings(id) ON DELETE SET NULL,
+                assignee_id INTEGER REFERENCES Users(id) ON DELETE CASCADE,
+                task TEXT NOT NULL,
+                deadline TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    else:
+        if "assignee_id" not in task_cols:
+            cursor.execute("ALTER TABLE Tasks ADD COLUMN assignee_id INTEGER REFERENCES Users(id)")
+        if "meeting_id" not in task_cols:
+            cursor.execute("ALTER TABLE Tasks ADD COLUMN meeting_id INTEGER REFERENCES Meetings(id)")
+        if "status" not in task_cols:
+            cursor.execute("ALTER TABLE Tasks ADD COLUMN status TEXT DEFAULT 'pending'")
+
+    # 5. UserAliases (id, user_id, alias_string) - user_id is a foreign key to Users
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS UserAliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+            alias_string TEXT NOT NULL
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_aliases_user_id ON UserAliases(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_aliases_alias ON UserAliases(alias_string)")
 
     # Pre-seed default team accounts
     seed_users = [
-        ("admin@gmail.com", "admin123", "Admin", "admin"),
-        ("rohith@gmail.com", "rohith123", "Rohith", "user"),
-        ("mayank@gmail.com", "mayank123", "Mayank", "user"),
-        ("sambhav@gmail.com", "sambhav123", "Sambhav", "user"),
+        ("Admin", "admin123", "admin"),
+        ("Rohith", "rohith123", "user"),
+        ("Mayank", "mayank123", "user"),
+        ("Sambhav", "sambhav123", "user"),
     ]
-    for email, pwd, name, role in seed_users:
-        cursor.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
-        if not cursor.fetchone():
+    user_id_map = {}
+    for name, pwd, role in seed_users:
+        cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (name,))
+        row = cursor.fetchone()
+        if not row:
             cursor.execute(
-                "INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, ?)",
-                (email.lower(), hash_password(pwd), name, role),
+                "INSERT INTO Users (canonical_name, password_hash, role) VALUES (?, ?, ?)",
+                (name, hash_password(pwd), role),
             )
+            user_id_map[name] = cursor.lastrowid
+        else:
+            user_id_map[name] = row[0]
+            cursor.execute(
+                "UPDATE Users SET password_hash = ?, role = ? WHERE id = ?",
+                (hash_password(pwd), role, row[0])
+            )
+
+    # Pre-seed UserAliases for seed users if table is empty
+    cursor.execute("SELECT COUNT(*) FROM UserAliases")
+    if cursor.fetchone()[0] == 0:
+        seed_aliases = [
+            (user_id_map["Admin"], ["Admin", "Administrator"]),
+            (user_id_map["Rohith"], ["Rohith", "Rohit", "Roheeth", "Rowhit", "D Rohith"]),
+            (user_id_map["Mayank"], ["Mayank", "Mayan", "Myank", "Mayank Sachdeva"]),
+            (user_id_map["Sambhav"], ["Sambhav", "Sambhav Chordia", "Sambav", "Somvav"]),
+        ]
+        for u_id, aliases in seed_aliases:
+            for al in aliases:
+                cursor.execute(
+                    "INSERT INTO UserAliases (user_id, alias_string) VALUES (?, ?)",
+                    (u_id, al),
+                )
+
+    # Pre-seed sample projects if empty
+    cursor.execute("SELECT COUNT(*) FROM Projects")
+    if cursor.fetchone()[0] == 0:
+        cursor.executemany(
+            "INSERT INTO Projects (name) VALUES (?)",
+            [("Workspace App",), ("Auth System",), ("UI Kit",), ("Project A",)]
+        )
+
+    # Pre-seed sample meetings if empty
+    cursor.execute("SELECT COUNT(*) FROM Meetings")
+    if cursor.fetchone()[0] == 0:
+        cursor.executemany(
+            "INSERT INTO Meetings (purpose, scheduled_time, config_flags) VALUES (?, ?, ?)",
+            [
+                ("AegisMeet Architecture Sync", "Today 10:00 AM", json.dumps({"expected_participants": [1, 2, 3, 4], "share_technical_summary": True})),
+                ("Sprint Review & Milestones", "Tomorrow 2:00 PM", json.dumps({"expected_participants": [2, 3], "share_technical_summary": False}))
+            ]
+        )
+
+    # Pre-seed sample tasks if empty or unassigned
+    cursor.execute("SELECT COUNT(*) FROM Tasks WHERE assignee_id IS NOT NULL")
+    if cursor.fetchone()[0] == 0:
+        rohith_id = user_id_map.get("Rohith", 2)
+        mayank_id = user_id_map.get("Mayank", 3)
+        sambhav_id = user_id_map.get("Sambhav", 4)
+        sample_tasks = [
+            (1, rohith_id, "Verify local Presidio PII token masking & SQLite task persistence", "Tomorrow at 5:00 PM", "pending"),
+            (1, rohith_id, "Deploy Discord and Slack webhook forwarders", "Next Friday", "pending"),
+            (1, rohith_id, "Configure Chromium CDP audio & caption pipeline", "Today", "completed"),
+            (1, mayank_id, "Deploy the backend updates", "Tomorrow at 5:00 PM", "pending"),
+            (1, mayank_id, "Review API risk assessment with Acme Corp", "Tomorrow at 2:00 PM", "completed"),
+            (1, sambhav_id, "Finish the QA test suite", "Friday", "pending"),
+            (1, sambhav_id, "Finalize personalized participant portal and mobile layout", "Tomorrow at 5:00 PM", "pending"),
+        ]
+        cursor.executemany(
+            "INSERT INTO Tasks (meeting_id, assignee_id, task, deadline, status) VALUES (?, ?, ?, ?, ?)",
+            sample_tasks
+        )
 
     conn.commit()
     conn.close()
-    logger.info(f"SQLite tasks and users database initialized at {DB_PATH}")
+    logger.info(f"Relational SQLite database initialized at {DB_PATH}")
 
 # Ensure DB is created on import
 init_db()
 
 
-def save_tasks_to_db(tasks: List[Dict[str, Any]]) -> List[int]:
+def get_user_id_by_name(canonical_name: str) -> Optional[int]:
+    """Resolves a canonical name to its Users table primary key ID."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (canonical_name.strip(),))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def save_tasks_to_db(tasks: List[Dict[str, Any]], meeting_id: Optional[int] = 1) -> List[int]:
     """
-    Saves tasks to SQLite with real rehydrated assignee names so each user
-    has their personalized action items persisted on localhost.
+    Saves tasks to SQLite with relational meeting_id and assignee_id foreign keys.
     """
     init_db()
     conn = sqlite3.connect(DB_PATH)
@@ -338,42 +472,156 @@ def save_tasks_to_db(tasks: List[Dict[str, Any]]) -> List[int]:
     inserted_ids = []
     for t in tasks:
         assignee_val = t.get("assignee") or t.get("assignee_token") or "Unassigned"
-        assignee_tok = t.get("assignee_token") or assignee_val
+        assignee_id = t.get("assignee_id")
+        if not assignee_id and assignee_val != "Unassigned":
+            cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (assignee_val.strip(),))
+            row = cursor.fetchone()
+            if row:
+                assignee_id = row[0]
+
+        task_mid = t.get("meeting_id") or meeting_id
+
         cursor.execute(
             """
-            INSERT INTO tasks (task, assignee, assignee_token, deadline, status)
+            INSERT INTO Tasks (meeting_id, assignee_id, task, deadline, status)
             VALUES (?, ?, ?, ?, ?)
             """,
             (
+                task_mid,
+                assignee_id,
                 t.get("task", ""),
-                assignee_val,
-                assignee_tok,
-                t.get("deadline", "Unspecified"),
+                t.get("deadline", "unknown"),
                 t.get("status", "pending"),
             ),
         )
         inserted_ids.append(cursor.lastrowid)
     conn.commit()
     conn.close()
-    logger.info(f"Saved {len(inserted_ids)} task(s) to SQLite.")
+    logger.info(f"Saved {len(inserted_ids)} relational task(s) to SQLite.")
     return inserted_ids
 
 
-def get_all_tasks_from_db(user: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_all_tasks_from_db(user: Optional[str] = None, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    if user:
+    if user_id:
         cursor.execute(
-            "SELECT id, task, assignee, assignee_token, deadline, status, created_at FROM tasks WHERE LOWER(assignee) = LOWER(?) OR LOWER(assignee) LIKE LOWER(?) ORDER BY id DESC",
-            (user, f"%{user}%"),
+            """
+            SELECT t.id, t.meeting_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+                   u.canonical_name as assignee
+            FROM Tasks t
+            LEFT JOIN Users u ON u.id = t.assignee_id
+            WHERE t.assignee_id = ?
+            ORDER BY t.id DESC
+            """,
+            (user_id,)
+        )
+    elif user:
+        cursor.execute(
+            """
+            SELECT t.id, t.meeting_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+                   u.canonical_name as assignee
+            FROM Tasks t
+            LEFT JOIN Users u ON u.id = t.assignee_id
+            WHERE LOWER(u.canonical_name) = LOWER(?) OR LOWER(u.canonical_name) LIKE LOWER(?)
+            ORDER BY t.id DESC
+            """,
+            (user, f"%{user}%")
         )
     else:
-        cursor.execute("SELECT id, task, assignee, assignee_token, deadline, status, created_at FROM tasks ORDER BY id DESC")
+        cursor.execute(
+            """
+            SELECT t.id, t.meeting_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+                   u.canonical_name as assignee
+            FROM Tasks t
+            LEFT JOIN Users u ON u.id = t.assignee_id
+            ORDER BY t.id DESC
+            """
+        )
     rows = cursor.fetchall()
     tasks = [dict(row) for row in rows]
     conn.close()
     return tasks
+
+
+# ==============================================================================
+# JWT Authentication Utilities & Dependencies
+# ==============================================================================
+JWT_SECRET = os.getenv("JWT_SECRET", "aegismeet-production-jwt-secret-key-2026-supersecure")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 24
+
+security_bearer = HTTPBearer(auto_error=False)
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_access_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.PyJWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)) -> dict:
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided. Bearer token required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = credentials.credentials
+    payload = decode_access_token(token)
+    user_id = payload.get("user_id")
+    canonical_name = payload.get("sub")
+    if not user_id or not canonical_name:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, canonical_name, role FROM Users WHERE id = ?", (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found in system.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return dict(user)
+
+
+async def get_current_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator access required.",
+        )
+    return current_user
 
 
 # ==============================================================================
@@ -694,22 +942,44 @@ class TaskCreatePayload(BaseModel):
     deadline: Optional[str] = "Unspecified"
 
 
+class LoginRequest(BaseModel):
+    canonical_name: Optional[str] = Field(None, description="Canonical username or email")
+    username: Optional[str] = None
+    email: Optional[str] = None
+    password: str = Field(..., description="Account password")
+
+
+class UserCreateRequest(BaseModel):
+    canonical_name: str = Field(..., description="Canonical unique name for user")
+    password: str = Field(..., description="User password")
+    role: Optional[str] = Field("user", description="Account role: 'admin' or 'user'")
+
+
+class MeetingCreateRequest(BaseModel):
+    purpose: str = Field(..., description="Meeting topic or purpose")
+    scheduled_time: Optional[str] = Field("Today", description="Scheduled meeting time")
+    config_flags: Optional[Dict[str, Any]] = Field(None, description="Dynamic flags such as expected_participants")
+
+
 class AuthLoginPayload(BaseModel):
-    email: str = Field(..., description="User email / Gmail address")
+    email: Optional[str] = None
+    canonical_name: Optional[str] = None
     password: str = Field(..., description="Account password")
 
 
 class AuthRegisterPayload(BaseModel):
-    email: str = Field(..., description="User email / Gmail address")
+    email: Optional[str] = None
+    canonical_name: Optional[str] = None
     password: str = Field(..., description="Account password")
     name: Optional[str] = None
 
 
 class UserResponse(BaseModel):
     id: int
-    email: str
-    name: str
+    canonical_name: str
     role: str
+    email: Optional[str] = None
+    name: Optional[str] = None
 
 
 _ACTIVE_BOT_INSTANCE: Optional[Any] = None
@@ -1040,8 +1310,8 @@ def aegis_meet_script_endpoint():
     return Response(content=js_content, media_type="application/javascript")
 
 
-@app.post("/login")
-@app.post("/api/login")
+@app.post("/bot/login")
+@app.post("/api/bot/login")
 async def bot_login_endpoint():
     """
     Opens native Google Chrome for one-time Google Sign-In into the bot profile.
@@ -1318,89 +1588,332 @@ def get_latest_result_endpoint():
 # ==============================================================================
 # Authentication & User Management Endpoints
 # ==============================================================================
+@app.post("/login")
+@app.post("/api/login")
 @app.post("/api/auth/login")
-def auth_login_endpoint(payload: AuthLoginPayload):
+def login_endpoint(payload: LoginRequest):
     """
-    Authenticates a user with email & password.
-    If the email does not exist yet, automatically provisions an account with
-    an isolated personal workspace (role: 'admin' if email starts with admin, else 'user').
+    Authenticates a user with canonical_name / email and password.
+    Returns signed JWT bearer token and user profile.
     """
-    clean_email = payload.email.strip().lower()
+    identifier = (payload.canonical_name or payload.username or payload.email or "").strip()
     clean_pwd = payload.password.strip()
-    if not clean_email or not clean_pwd:
-        raise HTTPException(status_code=400, detail="Email and password are required.")
+    if not identifier or not clean_pwd:
+        raise HTTPException(status_code=400, detail="Username/canonical_name and password are required.")
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT id, email, password_hash, name, role FROM users WHERE LOWER(email) = ?", (clean_email,))
+
+    # Search Users by canonical_name
+    cursor.execute("SELECT id, canonical_name, password_hash, role FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (identifier,))
     user = cursor.fetchone()
 
-    if user:
-        if not verify_password(clean_pwd, user["password_hash"]):
-            conn.close()
-            raise HTTPException(status_code=401, detail="Invalid email or password.")
-        user_dict = dict(user)
-    else:
-        # Auto-provision new account
-        local_part = clean_email.split("@")[0]
-        derived_name = local_part.replace(".", " ").replace("_", " ").title()
-        role = "admin" if clean_email.startswith("admin") or "@admin" in clean_email else "user"
-        cursor.execute(
-            "INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, ?)",
-            (clean_email, hash_password(clean_pwd), derived_name, role),
-        )
-        conn.commit()
-        new_id = cursor.lastrowid
-        user_dict = {
-            "id": new_id,
-            "email": clean_email,
-            "name": derived_name,
-            "role": role,
-        }
+    # If identifier has email format, also check local part
+    if not user and "@" in identifier:
+        local_name = identifier.split("@")[0].replace(".", " ").replace("_", " ").strip()
+        cursor.execute("SELECT id, canonical_name, password_hash, role FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (local_name,))
+        user = cursor.fetchone()
 
     conn.close()
-    token = f"aegis-{uuid.uuid4().hex[:16]}"
+
+    if not user or not verify_password(clean_pwd, user["password_hash"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user_dict = dict(user)
+    token = create_access_token({
+        "sub": user_dict["canonical_name"],
+        "user_id": user_dict["id"],
+        "role": user_dict["role"],
+    })
+
     return {
-        "status": "authenticated",
-        "token": token,
+        "access_token": token,
+        "token_type": "bearer",
         "user": {
             "id": user_dict["id"],
-            "email": user_dict["email"],
-            "name": user_dict["name"],
+            "canonical_name": user_dict["canonical_name"],
             "role": user_dict["role"],
         },
     }
 
 
-@app.get("/api/auth/users", response_model=List[UserResponse])
-def get_auth_users_endpoint():
-    """Returns all registered users (for admin viewing)."""
+@app.post("/users", status_code=status.HTTP_201_CREATED)
+@app.post("/api/users", status_code=status.HTTP_201_CREATED)
+async def create_user_endpoint(
+    payload: UserCreateRequest,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """
+    Admin-only endpoint to securely create new user profiles.
+    Auto-populates UserAliases with primary name and first name.
+    """
+    canonical_name = payload.canonical_name.strip()
+    password = payload.password.strip()
+    if not canonical_name or not password:
+        raise HTTPException(status_code=400, detail="canonical_name and password are required.")
+
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT id, email, name, role FROM users ORDER BY id ASC")
+    cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (canonical_name,))
+    if cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"User '{canonical_name}' already exists.")
+
+    pwd_hash = hash_password(password)
+    role = payload.role if payload.role in ("admin", "user") else "user"
+    cursor.execute(
+        "INSERT INTO Users (canonical_name, password_hash, role) VALUES (?, ?, ?)",
+        (canonical_name, pwd_hash, role),
+    )
+    conn.commit()
+    new_id = cursor.lastrowid
+
+    # Auto-add primary name as initial alias
+    cursor.execute(
+        "INSERT INTO UserAliases (user_id, alias_string) VALUES (?, ?)",
+        (new_id, canonical_name),
+    )
+    first_name = canonical_name.split()[0]
+    if first_name.lower() != canonical_name.lower():
+        cursor.execute(
+            "INSERT INTO UserAliases (user_id, alias_string) VALUES (?, ?)",
+            (new_id, first_name),
+        )
+    conn.commit()
+    conn.close()
+
+    logger.info(f"Admin '{current_admin['canonical_name']}' created user '{canonical_name}' (ID: {new_id}, Role: {role})")
+
+    return {
+        "status": "created",
+        "user": {
+            "id": new_id,
+            "canonical_name": canonical_name,
+            "role": role,
+        },
+    }
+
+
+@app.get("/me")
+@app.get("/api/me")
+def get_me_endpoint(current_user: dict = Depends(get_current_user)):
+    """Returns the authenticated user's profile."""
+    return {
+        "id": current_user["id"],
+        "canonical_name": current_user["canonical_name"],
+        "role": current_user["role"],
+    }
+
+
+@app.get("/users")
+@app.get("/api/users")
+@app.get("/api/auth/users")
+def get_auth_users_endpoint(current_user: dict = Depends(get_current_user)):
+    """Returns all registered users for team collaboration views."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, canonical_name, role FROM Users ORDER BY id ASC")
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-@app.get("/api/tasks", response_model=List[TaskResponse])
-def get_tasks_endpoint(user: Optional[str] = None):
-    """Returns stored tasks from SQLite, optionally filtered by user."""
-    return get_all_tasks_from_db(user=user)
+@app.get("/tasks")
+@app.get("/api/tasks")
+def get_tasks_endpoint(
+    meeting_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    user: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Strict Privacy Filtering:
+    - Normal user: Strictly filters by authenticated user's ID (ignoring any requested user_id).
+    - Admin: Can view all tasks or filter by user_id/meeting_id.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = """
+        SELECT t.id, t.meeting_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+               u.canonical_name as assignee
+        FROM Tasks t
+        LEFT JOIN Users u ON u.id = t.assignee_id
+    """
+    conditions = []
+    params = []
+
+    if current_user["role"] != "admin":
+        # Strict privacy enforcement: non-admins ONLY see their own tasks
+        conditions.append("t.assignee_id = ?")
+        params.append(current_user["id"])
+    else:
+        # Admin can view all or filter
+        if user_id:
+            conditions.append("t.assignee_id = ?")
+            params.append(user_id)
+        elif user:
+            conditions.append("(LOWER(u.canonical_name) = LOWER(?) OR LOWER(u.canonical_name) LIKE LOWER(?))")
+            params.extend([user, f"%{user}%"])
+
+    if meeting_id:
+        conditions.append("t.meeting_id = ?")
+        params.append(meeting_id)
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+
+    query += " ORDER BY t.id DESC"
+
+    cursor.execute(query, tuple(params))
+    rows = cursor.fetchall()
+    tasks = [dict(r) for r in rows]
+    conn.close()
+    return tasks
 
 
+@app.post("/tasks", status_code=status.HTTP_201_CREATED)
 @app.post("/api/tasks")
-def create_task_endpoint(payload: TaskCreatePayload):
-    """Allows manual creation of an action item from the personalized dashboard."""
+def create_task_endpoint(
+    payload: TaskCreatePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """Allows manual creation of an action item linked to assignee_id."""
+    assignee_val = payload.assignee or current_user["canonical_name"]
+    assignee_id = get_user_id_by_name(assignee_val) or current_user["id"]
     ids = save_tasks_to_db([{
         "task": payload.task,
-        "assignee": payload.assignee,
-        "deadline": payload.deadline,
+        "assignee": assignee_val,
+        "assignee_id": assignee_id,
+        "deadline": payload.deadline or "unknown",
         "status": "pending",
     }])
     return {"status": "created", "task_id": ids[0]}
+
+
+@app.get("/meetings")
+@app.get("/api/meetings")
+def get_meetings_endpoint(current_user: dict = Depends(get_current_user)):
+    """
+    Strict Privacy Filtering for Meetings:
+    - Normal user: Returns only meetings where the user is an expected participant or has assigned tasks.
+    - Admin: Returns all meetings.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, purpose, scheduled_time, config_flags FROM Meetings ORDER BY id DESC")
+    all_meetings = cursor.fetchall()
+
+    if current_user["role"] == "admin":
+        conn.close()
+        results = []
+        for m in all_meetings:
+            item = dict(m)
+            try:
+                item["config"] = json.loads(item["config_flags"]) if item["config_flags"] else {}
+            except Exception:
+                item["config"] = {}
+            results.append(item)
+        return results
+
+    # For non-admin, query meeting IDs where user has assigned tasks
+    cursor.execute("SELECT DISTINCT meeting_id FROM Tasks WHERE assignee_id = ?", (current_user["id"],))
+    task_meeting_ids = {r[0] for r in cursor.fetchall() if r[0] is not None}
+    conn.close()
+
+    user_id = current_user["id"]
+    filtered_meetings = []
+    for m in all_meetings:
+        m_dict = dict(m)
+        cfg = {}
+        try:
+            cfg = json.loads(m_dict["config_flags"]) if m_dict["config_flags"] else {}
+        except Exception:
+            pass
+        m_dict["config"] = cfg
+
+        participants = cfg.get("expected_participants", [])
+        if user_id in participants or m_dict["id"] in task_meeting_ids:
+            filtered_meetings.append(m_dict)
+
+    return filtered_meetings
+
+
+@app.post("/meetings", status_code=status.HTTP_201_CREATED)
+@app.post("/api/meetings", status_code=status.HTTP_201_CREATED)
+def create_meeting_endpoint(
+    payload: MeetingCreateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Creates a new meeting record in SQLite."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cfg_json = json.dumps(payload.config_flags or {"expected_participants": [current_user["id"]]})
+    cursor.execute(
+        "INSERT INTO Meetings (purpose, scheduled_time, config_flags) VALUES (?, ?, ?)",
+        (payload.purpose, payload.scheduled_time, cfg_json),
+    )
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+    return {
+        "status": "created",
+        "meeting": {
+            "id": new_id,
+            "purpose": payload.purpose,
+            "scheduled_time": payload.scheduled_time,
+            "config_flags": cfg_json,
+        },
+    }
+
+
+@app.get("/projects")
+@app.get("/api/projects")
+def get_projects_endpoint(current_user: dict = Depends(get_current_user)):
+    """Returns projects list."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name FROM Projects ORDER BY id ASC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.get("/aliases")
+@app.get("/api/aliases")
+def get_aliases_endpoint(current_user: dict = Depends(get_current_user)):
+    """Returns phonetic aliases for users."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    if current_user["role"] == "admin":
+        cursor.execute("""
+            SELECT a.id, a.user_id, a.alias_string, u.canonical_name
+            FROM UserAliases a
+            JOIN Users u ON u.id = a.user_id
+            ORDER BY a.user_id ASC
+        """)
+    else:
+        cursor.execute("""
+            SELECT a.id, a.user_id, a.alias_string, u.canonical_name
+            FROM UserAliases a
+            JOIN Users u ON u.id = a.user_id
+            WHERE a.user_id = ?
+            ORDER BY a.id ASC
+        """, (current_user["id"],))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 @app.patch("/api/tasks/{task_id}")
