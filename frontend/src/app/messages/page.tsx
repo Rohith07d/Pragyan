@@ -41,57 +41,131 @@ interface Channel {
   initialMessages: Message[];
 }
 
-const DEFAULT_CHANNELS: Channel[] = [
-  {
-    id: "general",
-    name: "general",
-    type: "channel",
-    unread: 0,
-    initialMessages: [],
-  },
-  {
-    id: "meeting-briefs",
-    name: "meeting-briefs",
-    type: "channel",
-    unread: 0,
-    initialMessages: [],
-  },
-  {
-    id: "engineering",
-    name: "engineering-zero-leak",
-    type: "channel",
-    unread: 0,
-    initialMessages: [],
-  },
-  {
-    id: "dm-mayank",
-    name: "Mayank Sachdeva",
-    type: "dm",
-    unread: 0,
-    role: "Tech Lead",
-    initialMessages: [],
-  },
-  {
-    id: "dm-sambhav",
-    name: "Sambhav Chordia",
-    type: "dm",
-    unread: 0,
-    role: "Frontend Specialist",
-    initialMessages: [],
-  },
-  {
+interface TeamMember {
+  id: string;
+  canonicalName: string;
+  fullName: string;
+  role: string;
+}
+
+export const ALL_TEAM_MEMBERS: TeamMember[] = [
+  { id: "rohith", canonicalName: "Rohith", fullName: "Rohith Dharmavarapu", role: "Engineering Lead" },
+  { id: "mayank", canonicalName: "Mayank", fullName: "Mayank Sachdeva", role: "Tech Lead" },
+  { id: "sambhav", canonicalName: "Sambhav", fullName: "Sambhav Chordia", role: "Frontend Specialist" },
+  { id: "sanjeet", canonicalName: "Sanjeet", fullName: "Sanjeet Kumar", role: "Security Engineer" },
+  { id: "pranav", canonicalName: "Pranav", fullName: "Pranav Sai", role: "Cloud Systems" },
+];
+
+export function isUserSelf(
+  senderName: string,
+  senderId: number | null | undefined,
+  user: AuthUser | null
+): boolean {
+  if (!user) return false;
+  if (senderId && user.id && Number(senderId) === Number(user.id)) return true;
+
+  const s = (senderName || "").trim().toLowerCase();
+  const c = (user.canonical_name || "").trim().toLowerCase();
+  const n = (user.name || "").trim().toLowerCase();
+
+  if (!s || (!c && !n)) return false;
+  if (s === c || s === n) return true;
+
+  // Partial match: e.g. "Mayank Sachdeva" contains "Mayank"
+  if (c && (s.includes(c) || c.includes(s))) return true;
+  if (n && (s.includes(n) || n.includes(s))) return true;
+
+  // Match first tokens (e.g. "Mayank" matches "Mayank Sachdeva")
+  const sFirst = s.split(/\s+/)[0];
+  const cFirst = c.split(/\s+/)[0];
+  const nFirst = n.split(/\s+/)[0];
+  if (sFirst && (sFirst === cFirst || sFirst === nFirst)) return true;
+
+  return false;
+}
+
+export function getDmChannelId(user1: string, user2: string): string {
+  const u1 = user1.toLowerCase().trim();
+  const u2 = user2.toLowerCase().trim();
+  const sorted = [u1, u2].sort();
+  return `dm-${sorted[0]}-${sorted[1]}`;
+}
+
+export function buildChannelsForUser(user: AuthUser | null): Channel[] {
+  const userCanonical = user?.canonical_name || user?.name || "";
+
+  const baseChannels: Channel[] = [
+    {
+      id: "general",
+      name: "general",
+      type: "channel",
+      unread: 0,
+      initialMessages: [],
+    },
+    {
+      id: "meeting-briefs",
+      name: "meeting-briefs",
+      type: "channel",
+      unread: 0,
+      initialMessages: [],
+    },
+    {
+      id: "engineering",
+      name: "engineering-zero-leak",
+      type: "channel",
+      unread: 0,
+      initialMessages: [],
+    },
+  ];
+
+  // Direct messages: Filter out the logged-in user so they NEVER see themselves in their DM list!
+  const targetMembers = ALL_TEAM_MEMBERS.filter((m) => {
+    if (!userCanonical) return true;
+    return !isUserSelf(m.canonicalName, null, user) && !isUserSelf(m.fullName, null, user);
+  });
+
+  const dmChannels: Channel[] = targetMembers.map((m) => {
+    // Generate symmetric channel ID, e.g. Mayank <-> Rohith is dm-mayank-rohith
+    const channelId = userCanonical ? getDmChannelId(userCanonical, m.canonicalName) : `dm-${m.id}`;
+    return {
+      id: channelId,
+      name: m.fullName,
+      type: "dm" as const,
+      unread: 0,
+      role: m.role,
+      initialMessages: [],
+    };
+  });
+
+  // Always append AegisBot
+  dmChannels.push({
     id: "dm-aegisbot",
     name: "AegisBot Assistant",
-    type: "dm",
+    type: "dm" as const,
     unread: 0,
     role: "Air-Gapped AI Assistant",
     initialMessages: [],
-  },
-];
+  });
+
+  return [...baseChannels, ...dmChannels];
+}
+
+const DEFAULT_CHANNELS: Channel[] = buildChannelsForUser(null);
 
 export default function MessagesPage() {
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
-  const [channels, setChannels] = useState<Channel[]>(DEFAULT_CHANNELS);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => {
+    if (typeof window !== "undefined") {
+      return getCurrentUser();
+    }
+    return null;
+  });
+  const [channels, setChannels] = useState<Channel[]>(() => {
+    if (typeof window !== "undefined") {
+      const u = getCurrentUser();
+      return buildChannelsForUser(u);
+    }
+    return DEFAULT_CHANNELS;
+  });
   const [activeChannelId, setActiveChannelId] = useState<string>("meeting-briefs");
   const [messageText, setMessageText] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -140,14 +214,15 @@ export default function MessagesPage() {
   useEffect(() => {
     const user = getCurrentUser();
     setCurrentUser(user);
+    const freshChannels = buildChannelsForUser(user);
 
     // Read saved channel unread map if available
     try {
       const savedMap = localStorage.getItem("aegis_channel_unread_map");
       if (savedMap) {
         const parsed = JSON.parse(savedMap);
-        setChannels((prev) =>
-          prev.map((c) => ({
+        setChannels(
+          freshChannels.map((c) => ({
             ...c,
             unread: c.id === activeChannelId ? 0 : (parsed[c.id] ?? c.unread),
           }))
@@ -156,6 +231,7 @@ export default function MessagesPage() {
       }
     } catch {}
 
+    setChannels(freshChannels);
     // First load: Mark initially opened channel as read
     markChannelAsRead(activeChannelId);
   }, []);
@@ -190,9 +266,7 @@ export default function MessagesPage() {
         if (!isMounted) return;
 
         const mapped: Message[] = (serverMsgs || []).map((sm) => {
-          const senderLower = (sm.sender_name || "").toLowerCase();
-          const userLower = (currentUser?.canonical_name || currentUser?.name || "").toLowerCase();
-          const isSelf = userLower ? senderLower === userLower : false;
+          const isSelf = isUserSelf(sm.sender_name, sm.sender_id, currentUser);
           return {
             id: String(sm.id),
             sender: sm.sender_name,
@@ -258,7 +332,8 @@ export default function MessagesPage() {
     setMessageText("");
 
     const senderName = currentUser?.canonical_name || currentUser?.name || "Team Member";
-    const senderRole = currentUser?.role === "admin" ? "Admin" : "Team Member";
+    const matchedMember = ALL_TEAM_MEMBERS.find((m) => isUserSelf(m.canonicalName, null, currentUser));
+    const senderRole = currentUser?.role === "admin" ? "Admin" : (matchedMember?.role || "Team Member");
 
     // Optimistic local UI update
     const optimisticMsg: Message = {
@@ -515,65 +590,68 @@ export default function MessagesPage() {
                     <p className="text-xs">No messages matching your filter.</p>
                   </div>
                 ) : (
-                  filteredMessages.map((msg) => (
-                    <div
-                      key={msg.id}
-                      className={`flex gap-3 text-xs leading-relaxed ${
-                        msg.isSelf ? "justify-end" : "justify-start"
-                      }`}
-                    >
-                      {!msg.isSelf && (
-                        <div
-                          className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold flex-shrink-0 ${
-                            msg.isBot
-                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                              : "bg-zinc-800 text-zinc-200 border border-zinc-700"
-                          }`}
-                        >
-                          {msg.isBot ? <Bot className="w-4 h-4" /> : msg.sender.charAt(0)}
-                        </div>
-                      )}
-
+                  filteredMessages.map((msg) => {
+                    const isSelf = msg.isSelf || isUserSelf(msg.sender, undefined, currentUser);
+                    return (
                       <div
-                        className={`max-w-[75%] rounded-2xl px-4 py-3 space-y-1 ${
-                          msg.isSelf
-                            ? "bg-white text-black"
-                            : msg.isBot
-                            ? "bg-emerald-950/30 border border-emerald-800/40 text-emerald-200"
-                            : "bg-zinc-900 border border-zinc-800 text-zinc-200"
+                        key={msg.id}
+                        className={`flex gap-3 text-xs leading-relaxed ${
+                          isSelf ? "justify-end" : "justify-start"
                         }`}
                       >
-                        <div className="flex items-center justify-between gap-3 text-[10px]">
-                          <span
-                            className={`font-semibold ${
-                              msg.isSelf
-                                ? "text-gray-900"
-                                : msg.isBot
-                                ? "text-emerald-400"
-                                : "text-zinc-400"
+                        {!isSelf && (
+                          <div
+                            className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold flex-shrink-0 ${
+                              msg.isBot
+                                ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                                : "bg-zinc-800 text-zinc-200 border border-zinc-700"
                             }`}
                           >
-                            {msg.isSelf ? "You" : msg.sender}
-                            {msg.senderRole && !msg.isSelf && (
-                              <span className="ml-1 opacity-70">({msg.senderRole})</span>
-                            )}
-                          </span>
-                          <span
-                            className={
-                              msg.isSelf
-                                ? "text-gray-500"
-                                : msg.isBot
-                                ? "text-emerald-500"
-                                : "text-zinc-500"
-                            }
-                          >
-                            {msg.timestamp}
-                          </span>
+                            {msg.isBot ? <Bot className="w-4 h-4" /> : msg.sender.charAt(0)}
+                          </div>
+                        )}
+
+                        <div
+                          className={`max-w-[75%] rounded-2xl px-4 py-3 space-y-1 ${
+                            isSelf
+                              ? "bg-white text-black"
+                              : msg.isBot
+                              ? "bg-emerald-950/30 border border-emerald-800/40 text-emerald-200"
+                              : "bg-zinc-900 border border-zinc-800 text-zinc-200"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-3 text-[10px]">
+                            <span
+                              className={`font-semibold ${
+                                isSelf
+                                  ? "text-gray-900"
+                                  : msg.isBot
+                                  ? "text-emerald-400"
+                                  : "text-zinc-400"
+                              }`}
+                            >
+                              {isSelf ? "You" : msg.sender}
+                              {msg.senderRole && !isSelf && (
+                                <span className="ml-1 opacity-70">({msg.senderRole})</span>
+                              )}
+                            </span>
+                            <span
+                              className={
+                                isSelf
+                                  ? "text-gray-500"
+                                  : msg.isBot
+                                  ? "text-emerald-500"
+                                  : "text-zinc-500"
+                              }
+                            >
+                              {msg.timestamp}
+                            </span>
+                          </div>
+                          <p className="text-xs whitespace-pre-wrap">{msg.text}</p>
                         </div>
-                        <p className="text-xs whitespace-pre-wrap">{msg.text}</p>
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
                 <div ref={messagesEndRef} />
               </div>

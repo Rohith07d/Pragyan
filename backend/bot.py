@@ -19,6 +19,7 @@ import asyncio
 import logging
 import argparse
 import subprocess
+import re
 from typing import Optional, List, Dict
 import httpx
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -65,6 +66,24 @@ def get_native_chrome_path() -> Optional[str]:
     return None
 
 
+def check_meeting_end_phrase(text: str) -> bool:
+    """Checks if speech caption contains explicit meeting ending phrases."""
+    if not text:
+        return False
+    lower = text.lower().strip()
+    pattern = (
+        r"\b(ending\s+((the|this)\s+)?meeting|end\s+((the|this)\s+)?meeting|"
+        r"ends\s+((the|this)\s+)?meeting|ended\s+((the|this)\s+)?meeting|"
+        r"wrap(\s*ping)?\s+up(\s+(the|this))?\s+meeting|wrap(\s*ping)?\s+up(\s+now)?|"
+        r"conclud(e|ing|ed)\s+((the|this)\s+)?meeting|adjourn(ing|ed)?\s+((the|this)\s+)?meeting|"
+        r"meeting\s+is\s+(over|adjourned|ended|finished)|"
+        r"leave\s+((the|this)\s+)?meeting|let\'?s\s+end\s+((the|this)\s+)?meeting|"
+        r"bye\s+everyone|goodbye\s+everyone|call\s+is\s+over|"
+        r"((aegis|bot|notetaker)\s+)?(leave|exit)\s+(the\s+)?(call|meeting))\b"
+    )
+    return bool(re.search(pattern, lower, re.IGNORECASE))
+
+
 class AegisMeetBot:
     def __init__(
         self,
@@ -87,11 +106,51 @@ class AegisMeetBot:
         self._is_running = False
         self.is_admitted = False
         self.admitted_time: Optional[float] = None
+        self._has_finalized = False
 
     def stop(self):
         """Signals the running bot loop to stop and finalize processing."""
         logger.info("Stop signal received for AegisMeetBot.")
         self._is_running = False
+
+    async def leave_call(self):
+        """Attempts to click the red 'Leave call' button in Google Meet."""
+        if not self.page or self.page.is_closed():
+            return
+        logger.info("Attempting to click Google Meet 'Leave call' button...")
+        leave_selectors = [
+            'button[aria-label*="Leave call" i]',
+            'button[aria-label*="leave" i]',
+            'button[aria-label*="verlaten" i]',
+            'button[jsname="CQylAd"]',
+            'button:has-text("Leave call")',
+            'button:has-text("Leave")',
+            '[data-tooltip*="Leave" i]',
+        ]
+        for sel in leave_selectors:
+            try:
+                btn = self.page.locator(sel)
+                if await btn.count() > 0 and await btn.first.is_visible():
+                    await btn.first.click()
+                    logger.info(f"Successfully clicked leave call button ({sel}).")
+                    await asyncio.sleep(1.0)
+                    break
+            except Exception as e:
+                logger.debug(f"Selector {sel} failed: {e}")
+
+        # Check for confirmation modal dialog (e.g. 'Leave call' or 'Just leave the call')
+        try:
+            modal_leave = self.page.locator(
+                'div[role="dialog"] button:has-text("Leave"), '
+                'div[role="dialog"] button:has-text("Just leave"), '
+                'div[role="dialog"] button:has-text("Leave call")'
+            )
+            if await modal_leave.count() > 0 and await modal_leave.first.is_visible():
+                await modal_leave.first.click()
+                logger.info("Clicked confirmation leave button in modal dialog.")
+                await asyncio.sleep(0.5)
+        except Exception:
+            pass
 
     async def send_intake_chunk(self, speaker: str, text: str):
         """Streams an extracted caption chunk to the local FastAPI proxy."""
@@ -114,6 +173,11 @@ class AegisMeetBot:
 
     async def trigger_final_processing(self) -> Optional[Dict]:
         """Sends the accumulated transcript to the proxy's zero-leak pipeline."""
+        if getattr(self, "_has_finalized", False):
+            logger.info("Session already finalized; skipping redundant processing.")
+            return None
+        self._has_finalized = True
+
         full_transcript = "\n".join(self.collected_chunks).strip()
         if not full_transcript:
             logger.warning("No transcript captured to process.")
@@ -460,6 +524,9 @@ class AegisMeetBot:
                         if clean and clean not in seen_texts:
                             seen_texts.add(clean)
                             await self.send_intake_chunk(speaker, clean)
+                            if check_meeting_end_phrase(clean):
+                                logger.info(f"Meeting conclusion spoken by [{speaker}]: '{clean}'. Stopping bot...")
+                                self.stop()
 
                     await self.page.expose_function("aegisMutationBridge", handle_browser_caption)
 
@@ -708,6 +775,9 @@ class AegisMeetBot:
                                 seen_texts.add(text)
                                 logger.info(f"Captured Live Caption -> [{speaker}]: {text}")
                                 await self.send_intake_chunk(speaker, text)
+                                if check_meeting_end_phrase(text):
+                                    logger.info(f"Meeting conclusion detected in polling [{speaker}]: '{text}'. Stopping bot...")
+                                    self.stop()
                     except Exception as e:
                         logger.debug(f"Caption polling interval: {e}")
 
@@ -720,12 +790,24 @@ class AegisMeetBot:
                 except Exception:
                     pass
 
+                # Explicitly click the Google Meet red Leave call button before closing context!
+                try:
+                    await self.leave_call()
+                except Exception as e:
+                    logger.warning(f"Error clicking leave call: {e}")
+
                 logger.info("Meeting monitoring completed.")
                 await self.trigger_final_processing()
                 if self.context:
-                    await self.context.close()
+                    try:
+                        await self.context.close()
+                    except Exception:
+                        pass
                 elif self.browser:
-                    await self.browser.close()
+                    try:
+                        await self.browser.close()
+                    except Exception:
+                        pass
 
         finally:
             # Terminate native Chrome process if spawned

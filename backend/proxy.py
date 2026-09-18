@@ -124,8 +124,8 @@ analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
 # Fallback team names for uninitialized environments
 TEAM_MEMBER_NAMES = [
     "Mayank Sachdeva", "Mayank", "D Rohith", "Rohith",
-    "Bachu Sai Sanjeet", "Sai Sanjeet", "Sanjeet",
-    "Sambhav Chordia", "Sambhav", "R.Pranav sai", "Pranav sai", "Pranav",
+    "Bachu Sai Sanjeet", "Sai Sanjeet", "Sanjeet", "Sanjeet Kumar",
+    "Sambhav Chordia", "Sambhav", "R.Pranav sai", "Pranav sai", "Pranav", "Pranav Sai",
 ]
 
 
@@ -694,6 +694,8 @@ def init_db():
         ("Rohith", "rohith123", "user"),
         ("Mayank", "mayank123", "user"),
         ("Sambhav", "sambhav123", "user"),
+        ("Sanjeet", "sanjeet123", "user"),
+        ("Pranav", "pranav123", "user"),
     ]
     user_id_map = {}
     for name, pwd, role in seed_users:
@@ -713,6 +715,13 @@ def init_db():
             )
 
     # Pre-seed UserAliases for seed users (ensuring at least 100 phonetic aliases per user)
+    custom_name_aliases = {
+        "Rohith": ["D Rohith", "Rohith Dharmavarapu", "Rohith D"],
+        "Mayank": ["Mayank Sachdeva", "M. Sachdeva"],
+        "Sambhav": ["Sambhav Chordia", "S. Chordia"],
+        "Sanjeet": ["Bachu Sai Sanjeet", "Sai Sanjeet", "Sanjeet Kumar", "B.S. Sanjeet"],
+        "Pranav": ["R.Pranav sai", "Pranav Sai", "Pranav sai", "R Pranav"],
+    }
     for name, _, _ in seed_users:
         u_id = user_id_map.get(name)
         if u_id:
@@ -722,7 +731,7 @@ def init_db():
                 fallback_list = generate_fallback_aliases(name)
                 # Add default name tokens
                 first_tok = get_primary_name_token(name)
-                to_save = [name, first_tok] + fallback_list
+                to_save = [name, first_tok] + custom_name_aliases.get(name, []) + fallback_list
                 for al in to_save:
                     cursor.execute(
                         "SELECT id FROM UserAliases WHERE user_id = ? AND LOWER(alias_string) = LOWER(?)",
@@ -748,7 +757,7 @@ def init_db():
         cursor.executemany(
             "INSERT INTO Meetings (purpose, scheduled_time, config_flags) VALUES (?, ?, ?)",
             [
-                ("AegisMeet Architecture Sync", "Today 10:00 AM", json.dumps({"expected_participants": [1, 2, 3, 4], "share_technical_summary": True})),
+                ("AegisMeet Architecture Sync", "Today 10:00 AM", json.dumps({"expected_participants": [1, 2, 3, 4, 5, 6], "share_technical_summary": True})),
                 ("Sprint Review & Milestones", "Tomorrow 2:00 PM", json.dumps({"expected_participants": [2, 3], "share_technical_summary": False}))
             ]
         )
@@ -759,6 +768,8 @@ def init_db():
         rohith_id = user_id_map.get("Rohith", 2)
         mayank_id = user_id_map.get("Mayank", 3)
         sambhav_id = user_id_map.get("Sambhav", 4)
+        sanjeet_id = user_id_map.get("Sanjeet", 5)
+        pranav_id = user_id_map.get("Pranav", 6)
         sample_tasks = [
             (1, rohith_id, "Verify local Presidio PII token masking & SQLite task persistence", "Tomorrow at 5:00 PM", "pending"),
             (1, rohith_id, "Deploy Discord and Slack webhook forwarders", "Next Friday", "pending"),
@@ -767,11 +778,31 @@ def init_db():
             (1, mayank_id, "Review API risk assessment with Acme Corp", "Tomorrow at 2:00 PM", "completed"),
             (1, sambhav_id, "Finish the QA test suite", "Friday", "pending"),
             (1, sambhav_id, "Finalize personalized participant portal and mobile layout", "Tomorrow at 5:00 PM", "pending"),
+            (1, sanjeet_id, "Audit Presidio zero-leak PII anonymizer and security boundaries", "Tomorrow at 5:00 PM", "pending"),
+            (1, pranav_id, "Verify cloud deployment pipelines and TLS proxy endpoints", "Friday", "pending"),
         ]
         cursor.executemany(
             "INSERT INTO Tasks (meeting_id, assignee_id, task, deadline, status) VALUES (?, ?, ?, ?, ?)",
             sample_tasks
         )
+
+    # Ensure Sanjeet and Pranav specifically have sample tasks if DB was already populated
+    sanjeet_id = user_id_map.get("Sanjeet")
+    if sanjeet_id:
+        cursor.execute("SELECT COUNT(*) FROM Tasks WHERE assignee_id = ?", (sanjeet_id,))
+        if cursor.fetchone()[0] == 0:
+            cursor.execute(
+                "INSERT INTO Tasks (meeting_id, assignee_id, task, deadline, status) VALUES (?, ?, ?, ?, ?)",
+                (1, sanjeet_id, "Audit Presidio zero-leak PII anonymizer and security boundaries", "Tomorrow at 5:00 PM", "pending")
+            )
+    pranav_id = user_id_map.get("Pranav")
+    if pranav_id:
+        cursor.execute("SELECT COUNT(*) FROM Tasks WHERE assignee_id = ?", (pranav_id,))
+        if cursor.fetchone()[0] == 0:
+            cursor.execute(
+                "INSERT INTO Tasks (meeting_id, assignee_id, task, deadline, status) VALUES (?, ?, ?, ?, ?)",
+                (1, pranav_id, "Verify cloud deployment pipelines and TLS proxy endpoints", "Friday", "pending")
+            )
 
     # 6. Messages (id, channel_id, sender_id, sender_name, sender_role, text, created_at)
     cursor.execute("""
@@ -2287,6 +2318,16 @@ async def end_meeting_endpoint(
     mid_str = str(target_mid_raw)
     mid_int = int(target_mid_raw) if str(target_mid_raw).isdigit() else 1
 
+    # Signal active Playwright bot to leave and finish gracefully
+    global _ACTIVE_BOT_INSTANCE
+    if _ACTIVE_BOT_INSTANCE and getattr(_ACTIVE_BOT_INSTANCE, "_is_running", False):
+        try:
+            logger.info("Triggering stop signal on active bot instance from end_meeting_endpoint.")
+            _ACTIVE_BOT_INSTANCE._has_finalized = True
+            _ACTIVE_BOT_INSTANCE.stop()
+        except Exception as e:
+            logger.warning(f"Failed to stop active bot instance on end_meeting: {e}")
+
     # 1. Grab accumulated transcript buffer from RAM
     chunks = get_meeting_buffer(mid_str)
     if not chunks and str(target_mid_raw) != str(mid_int):
@@ -2302,6 +2343,10 @@ async def end_meeting_endpoint(
         def_chunks = get_meeting_buffer("default")
         if def_chunks:
             raw_transcript = "\n".join(def_chunks).strip()
+
+    # Fallback to active bot's in-memory chunks if RAM buffer was empty
+    if not raw_transcript and _ACTIVE_BOT_INSTANCE and getattr(_ACTIVE_BOT_INSTANCE, "collected_chunks", None):
+        raw_transcript = "\n".join(_ACTIVE_BOT_INSTANCE.collected_chunks).strip()
 
     if not raw_transcript:
         raise HTTPException(
@@ -3124,18 +3169,44 @@ def get_messages_endpoint(
 ):
     """
     Returns messages, optionally filtered by channel_id.
+    Supports symmetric DM channels (e.g. dm-mayank-rohith <-> dm-rohith-mayank, dm-mayank, dm-rohith).
     Enables real-time cross-client message synchronization.
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     if channel_id:
-        cursor.execute("""
-            SELECT id, channel_id, sender_id, sender_name, sender_role, text, created_at
-            FROM Messages
-            WHERE channel_id = ?
-            ORDER BY id ASC
-        """, (channel_id,))
+        if channel_id.startswith("dm-"):
+            parts = channel_id[3:].split("-")
+            if len(parts) == 2:
+                u1, u2 = parts[0].lower(), parts[1].lower()
+                match_channels = [
+                    f"dm-{u1}-{u2}",
+                    f"dm-{u2}-{u1}",
+                    f"dm-{u1}",
+                    f"dm-{u2}",
+                ]
+                placeholders = ",".join("?" for _ in match_channels)
+                cursor.execute(f"""
+                    SELECT id, channel_id, sender_id, sender_name, sender_role, text, created_at
+                    FROM Messages
+                    WHERE channel_id IN ({placeholders})
+                    ORDER BY id ASC
+                """, match_channels)
+            else:
+                cursor.execute("""
+                    SELECT id, channel_id, sender_id, sender_name, sender_role, text, created_at
+                    FROM Messages
+                    WHERE channel_id = ?
+                    ORDER BY id ASC
+                """, (channel_id,))
+        else:
+            cursor.execute("""
+                SELECT id, channel_id, sender_id, sender_name, sender_role, text, created_at
+                FROM Messages
+                WHERE channel_id = ?
+                ORDER BY id ASC
+            """, (channel_id,))
     else:
         cursor.execute("""
             SELECT id, channel_id, sender_id, sender_name, sender_role, text, created_at
@@ -3214,12 +3285,27 @@ def create_message_endpoint(
 def clear_messages_endpoint(channel_id: Optional[str] = None):
     """
     Clears messages from the database.
-    If channel_id is provided, clears only that channel. Otherwise, clears all messages.
+    If channel_id is provided, clears only that channel (and its symmetric aliases). Otherwise, clears all messages.
     """
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     cursor = conn.cursor()
     if channel_id:
-        cursor.execute("DELETE FROM Messages WHERE channel_id = ?", (channel_id,))
+        if channel_id.startswith("dm-"):
+            parts = channel_id[3:].split("-")
+            if len(parts) == 2:
+                u1, u2 = parts[0].lower(), parts[1].lower()
+                match_channels = [
+                    f"dm-{u1}-{u2}",
+                    f"dm-{u2}-{u1}",
+                    f"dm-{u1}",
+                    f"dm-{u2}",
+                ]
+                placeholders = ",".join("?" for _ in match_channels)
+                cursor.execute(f"DELETE FROM Messages WHERE channel_id IN ({placeholders})", match_channels)
+            else:
+                cursor.execute("DELETE FROM Messages WHERE channel_id = ?", (channel_id,))
+        else:
+            cursor.execute("DELETE FROM Messages WHERE channel_id = ?", (channel_id,))
     else:
         cursor.execute("DELETE FROM Messages")
     conn.commit()
@@ -3270,18 +3356,22 @@ def delete_task_endpoint(task_id: int):
 
 @app.get("/api/participants")
 def get_participants_endpoint():
-    """Returns all unique meeting participants detected from tasks and captions."""
+    """Returns all unique meeting participants detected from tasks, captions, and users."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT assignee FROM tasks WHERE assignee IS NOT NULL AND assignee != '' AND assignee != 'Unassigned'")
     rows = cursor.fetchall()
-    conn.close()
     names = set([r[0] for r in rows if r[0] and not r[0].startswith("[")])
+    cursor.execute("SELECT canonical_name FROM Users WHERE role != 'admin'")
+    for u in cursor.fetchall():
+        if u[0] and not u[0].startswith("["):
+            names.add(u[0])
+    conn.close()
     for chunk in _LIVE_INTAKE_FEED:
         spk = chunk.get("speaker")
         if spk and spk not in ("Participant", "System Notice") and not spk.startswith("["):
             names.add(spk)
-    default_team = ["Rohith", "Mayank", "Sambhav"]
+    default_team = ["Rohith", "Mayank", "Sambhav", "Sanjeet", "Pranav"]
     for d in default_team:
         names.add(d)
     return sorted(list(names))
