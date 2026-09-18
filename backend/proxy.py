@@ -17,6 +17,8 @@ import ast
 import sqlite3
 import logging
 import time
+import hashlib
+import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
@@ -259,8 +261,16 @@ def rehydrate_payload(payload: Dict[str, Any], pii_map: Dict[str, str]) -> Dict[
 
 
 # ==============================================================================
-# SQLite Database Setup (Persistent Tasks with Hydrated Assignees)
+# SQLite Database Setup (Persistent Tasks & User Authentication)
 # ==============================================================================
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.strip().encode("utf-8")).hexdigest()
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    return hash_password(password) == password_hash
+
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -275,6 +285,16 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     # Check if assignee column exists for existing DBs
     cursor.execute("PRAGMA table_info(tasks)")
     columns = [row[1] for row in cursor.fetchall()]
@@ -283,9 +303,25 @@ def init_db():
             cursor.execute("ALTER TABLE tasks ADD COLUMN assignee TEXT")
         except Exception:
             pass
+
+    # Pre-seed default team accounts
+    seed_users = [
+        ("admin@gmail.com", "admin123", "Admin", "admin"),
+        ("rohith@gmail.com", "rohith123", "Rohith", "user"),
+        ("mayank@gmail.com", "mayank123", "Mayank", "user"),
+        ("sambhav@gmail.com", "sambhav123", "Sambhav", "user"),
+    ]
+    for email, pwd, name, role in seed_users:
+        cursor.execute("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", (email,))
+        if not cursor.fetchone():
+            cursor.execute(
+                "INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, ?)",
+                (email.lower(), hash_password(pwd), name, role),
+            )
+
     conn.commit()
     conn.close()
-    logger.info(f"SQLite tasks database initialized at {DB_PATH}")
+    logger.info(f"SQLite tasks and users database initialized at {DB_PATH}")
 
 # Ensure DB is created on import
 init_db()
@@ -656,6 +692,24 @@ class TaskCreatePayload(BaseModel):
     task: str = Field(..., description="Action item description")
     assignee: Optional[str] = "Unassigned"
     deadline: Optional[str] = "Unspecified"
+
+
+class AuthLoginPayload(BaseModel):
+    email: str = Field(..., description="User email / Gmail address")
+    password: str = Field(..., description="Account password")
+
+
+class AuthRegisterPayload(BaseModel):
+    email: str = Field(..., description="User email / Gmail address")
+    password: str = Field(..., description="Account password")
+    name: Optional[str] = None
+
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    name: str
+    role: str
 
 
 _ACTIVE_BOT_INSTANCE: Optional[Any] = None
@@ -1259,6 +1313,76 @@ async def process_pipeline_endpoint(payload: TranscriptPayload, background_tasks
 def get_latest_result_endpoint():
     """Returns the latest processed meeting notes and summary."""
     return _LATEST_MEETING_RESULT or {}
+
+
+# ==============================================================================
+# Authentication & User Management Endpoints
+# ==============================================================================
+@app.post("/api/auth/login")
+def auth_login_endpoint(payload: AuthLoginPayload):
+    """
+    Authenticates a user with email & password.
+    If the email does not exist yet, automatically provisions an account with
+    an isolated personal workspace (role: 'admin' if email starts with admin, else 'user').
+    """
+    clean_email = payload.email.strip().lower()
+    clean_pwd = payload.password.strip()
+    if not clean_email or not clean_pwd:
+        raise HTTPException(status_code=400, detail="Email and password are required.")
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, email, password_hash, name, role FROM users WHERE LOWER(email) = ?", (clean_email,))
+    user = cursor.fetchone()
+
+    if user:
+        if not verify_password(clean_pwd, user["password_hash"]):
+            conn.close()
+            raise HTTPException(status_code=401, detail="Invalid email or password.")
+        user_dict = dict(user)
+    else:
+        # Auto-provision new account
+        local_part = clean_email.split("@")[0]
+        derived_name = local_part.replace(".", " ").replace("_", " ").title()
+        role = "admin" if clean_email.startswith("admin") or "@admin" in clean_email else "user"
+        cursor.execute(
+            "INSERT INTO users (email, password_hash, name, role) VALUES (?, ?, ?, ?)",
+            (clean_email, hash_password(clean_pwd), derived_name, role),
+        )
+        conn.commit()
+        new_id = cursor.lastrowid
+        user_dict = {
+            "id": new_id,
+            "email": clean_email,
+            "name": derived_name,
+            "role": role,
+        }
+
+    conn.close()
+    token = f"aegis-{uuid.uuid4().hex[:16]}"
+    return {
+        "status": "authenticated",
+        "token": token,
+        "user": {
+            "id": user_dict["id"],
+            "email": user_dict["email"],
+            "name": user_dict["name"],
+            "role": user_dict["role"],
+        },
+    }
+
+
+@app.get("/api/auth/users", response_model=List[UserResponse])
+def get_auth_users_endpoint():
+    """Returns all registered users (for admin viewing)."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, email, name, role FROM users ORDER BY id ASC")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 @app.get("/api/tasks", response_model=List[TaskResponse])

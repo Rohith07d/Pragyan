@@ -538,7 +538,7 @@ class AegisMeetBot:
                         function scanCaptions() {
                             // Look for Google Meet caption containers (and mock-meet container)
                             const containers = document.querySelectorAll(
-                                'div[jscontroller="D1tHje"], div[jsname="YSxPtf"], div.a4bIc, div.T4LgNb'
+                                '[role="region"][aria-label*="Captions" i], [aria-live="polite"], [aria-live="assertive"], div[jscontroller="D1tHje"], div[jsname="YSxPtf"], div.a4bIc, div.iTTPOb, div[jsname="tgaKEf"], div.T4LgNb, div.nM9PId'
                             );
                             const now = Date.now();
                             const activeElements = new Set();
@@ -546,15 +546,15 @@ class AegisMeetBot:
                             containers.forEach(el => {
                                 // Find speaker label
                                 let speaker = "Participant";
-                                const spkEl = el.querySelector('div.zs75Ib, div.jxFHg, span[jsname="V67aGc"]') ||
-                                              el.closest('div[jscontroller="D1tHje"]')?.querySelector('div.zs75Ib, div.jxFHg');
+                                const spkEl = el.querySelector('div.zs75Ib, div.jxFHg, span[jsname="V67aGc"], .NWtEwe') ||
+                                              el.closest('div[jscontroller="D1tHje"], [role="region"]')?.querySelector('div.zs75Ib, div.jxFHg, .NWtEwe');
                                 if (spkEl) {
                                     const s = spkEl.textContent.trim();
                                     if (s && !isUiNoise(s)) speaker = s;
                                 }
 
                                 // Find caption text
-                                const textEl = el.querySelector('.a4bIc, div[jsname="YSxPtf"], span.yg3OAc') || el;
+                                const textEl = el.querySelector('.a4bIc, div[jsname="YSxPtf"], span.yg3OAc, div[jsname="tgaKEf"], [aria-live="polite"]') || el;
                                 let rawText = textEl.textContent.trim();
 
                                 // If raw text starts with the speaker name, strip it
@@ -585,10 +585,10 @@ class AegisMeetBot:
                                     }
                                 }
 
-                                // Flush condition 1: speaker paused for >= 1200ms
-                                if (now - record.lastChangedTime >= 1200 && record.fullText.length > record.sentLength) {
+                                // Flush condition 1: speaker paused for >= 700ms
+                                if (now - record.lastChangedTime >= 700 && record.fullText.length > record.sentLength) {
                                     flushRecord(record);
-                                } else if (record.fullText.length - record.sentLength > 50) {
+                                } else if (record.fullText.length - record.sentLength > 40) {
                                     // Flush condition 2: completed sentence (. ? !) in a long thought
                                     const unsent = record.fullText.slice(record.sentLength);
                                     const match = unsent.match(/^(.+?[.?!])\\s+/);
@@ -613,8 +613,8 @@ class AegisMeetBot:
                             }
                         }
 
-                        // Run continuous scanner every 350ms
-                        window.__AEGIS_SCAN_INTERVAL__ = setInterval(scanCaptions, 350);
+                        // Run continuous scanner every 300ms
+                        window.__AEGIS_SCAN_INTERVAL__ = setInterval(scanCaptions, 300);
 
                         // Also trigger on DOM mutations for instant reactivity
                         const obs = new MutationObserver(() => scanCaptions());
@@ -632,20 +632,52 @@ class AegisMeetBot:
                 except Exception as e:
                     logger.warning(f"Could not register client-side scraper ({e}); relying on polling.")
 
+                poll_count = 0
                 while self._is_running and (time.time() - start_time < max_duration_sec):
+                    poll_count += 1
+                    # Continuous Auto-Dismiss of Language/Notice Modals
                     try:
-                        # Fallback query for any un-flushed elements directly via Playwright
+                        modal_dialogs = self.page.locator('div[role="dialog"], div[aria-modal="true"]')
+                        if await modal_dialogs.count() > 0 and await modal_dialogs.first.is_visible():
+                            logger.info("Auto-dismissing Google Meet modal/dialog...")
+                            dismiss_btns = ["Save", "Apply", "Done", "Got it", "Begrepen", "Close"]
+                            dismissed = False
+                            for text in dismiss_btns:
+                                d_btn = modal_dialogs.locator(f'button:has-text("{text}")')
+                                if await d_btn.count() > 0 and await d_btn.first.is_visible():
+                                    await d_btn.first.click()
+                                    dismissed = True
+                                    break
+                            if not dismissed:
+                                await self.page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+
+                    # Periodic Caption Enforcer: Check every 5 iterations (~3 seconds)
+                    if poll_count % 5 == 0:
+                        try:
+                            turn_on_btn = self.page.locator('button[aria-label*="Turn on captions" i], button[aria-label*="Enable captions" i]')
+                            if await turn_on_btn.count() > 0 and await turn_on_btn.first.is_visible():
+                                logger.info("Detected captions toggled off; re-enabling captions...")
+                                await turn_on_btn.first.click()
+                                await asyncio.sleep(0.3)
+                                await self.page.keyboard.press("Escape")
+                        except Exception:
+                            pass
+
+                    try:
+                        # Fallback query for any caption elements directly via Playwright
                         caption_elements = await self.page.query_selector_all(
-                            'div[jsname="YSxPtf"], div.a4bIc, span.yg3OAc'
+                            '[role="region"][aria-label*="Captions" i] span, div[jsname="YSxPtf"], div.a4bIc, span.yg3OAc, [aria-live="polite"] span, div[jsname="tgaKEf"]'
                         )
                         for el in caption_elements:
                             text = (await el.inner_text()).strip()
                             if not text or len(text) < 2 or (":" in text and len(text) <= 5):
                                 continue
                             speaker = "Participant"
-                            parent = await el.evaluate_handle("el => el.closest('div[jscontroller=\"D1tHje\"]') || el.parentElement")
+                            parent = await el.evaluate_handle("el => el.closest('div[jscontroller=\"D1tHje\"], [role=\"region\"], div.nM9PId') || el.parentElement")
                             if parent:
-                                speaker_el = await parent.as_element().query_selector('div.zs75Ib, div.jxFHg')
+                                speaker_el = await parent.as_element().query_selector('div.zs75Ib, div.jxFHg, span[jsname="V67aGc"], .NWtEwe')
                                 if speaker_el:
                                     s_txt = (await speaker_el.inner_text()).strip()
                                     if s_txt:
@@ -654,11 +686,12 @@ class AegisMeetBot:
                                 text = text[len(speaker):].strip()
                             if text and text not in seen_texts:
                                 seen_texts.add(text)
+                                logger.info(f"Captured Live Caption -> [{speaker}]: {text}")
                                 await self.send_intake_chunk(speaker, text)
                     except Exception as e:
                         logger.debug(f"Caption polling interval: {e}")
 
-                    await asyncio.sleep(0.8)
+                    await asyncio.sleep(0.6)
 
                 # Finalize
                 try:

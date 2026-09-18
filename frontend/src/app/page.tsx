@@ -6,6 +6,7 @@ import {
   ShieldCheck,
   CheckCircle2,
   Clock,
+  User,
   AlertTriangle,
   Calendar,
   Video,
@@ -20,9 +21,22 @@ import {
   CheckSquare,
   Square,
   Users,
+  LogOut,
+  Lock,
+  Mail,
+  Crown,
+  ArrowRight,
+  KeyRound,
 } from "lucide-react";
 
 const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL || "http://localhost:8000";
+
+interface AuthUser {
+  id: number;
+  email: string;
+  name: string;
+  role: "admin" | "user";
+}
 
 interface TaskItem {
   id: number;
@@ -74,24 +88,31 @@ interface BotStatus {
   duration_sec: number;
 }
 
-export default function AegisMeetDashboard() {
-  // State: Participants & Active User
-  const [participants, setParticipants] = useState<string[]>(["Rohith", "Mayank", "Sambhav"]);
-  const [selectedUser, setSelectedUser] = useState<string>("Rohith");
+export default function AegisMeetApp() {
+  // Authentication State
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authEmail, setAuthEmail] = useState<string>("");
+  const [authPassword, setAuthPassword] = useState<string>("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isSubmittingAuth, setIsSubmittingAuth] = useState<boolean>(false);
 
-  // State: User Personalized Dashboard Data
+  // Participants & Admin Switcher State
+  const [participants, setParticipants] = useState<string[]>(["Rohith", "Mayank", "Sambhav"]);
+  const [activeProfileView, setActiveProfileView] = useState<string>("Rohith");
+
+  // User Dashboard Data
   const [userData, setUserData] = useState<UserDashboardData | null>(null);
-  const [loadingUser, setLoadingUser] = useState<boolean>(true);
+  const [loadingUser, setLoadingUser] = useState<boolean>(false);
   const [taskFilter, setTaskFilter] = useState<"all" | "pending" | "completed">("all");
 
-  // State: All Team Tasks (for Team Overview)
+  // Admin Team Overview State
   const [allTeamTasks, setAllTeamTasks] = useState<TaskItem[]>([]);
   const [showTeamOverview, setShowTeamOverview] = useState<boolean>(false);
 
-  // State: Latest Meeting Recap
+  // Latest Meeting Recap
   const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null);
 
-  // State: Bot Controller
+  // Bot Controller State
   const [meetUrlInput, setMeetUrlInput] = useState<string>("");
   const [botStatus, setBotStatus] = useState<BotStatus>({
     active: false,
@@ -105,12 +126,26 @@ export default function AegisMeetDashboard() {
   const [isLeaving, setIsLeaving] = useState<boolean>(false);
   const [botMessage, setBotMessage] = useState<string | null>(null);
 
-  // State: Add Task Form
+  // Add Task State
   const [isAddingTask, setIsAddingTask] = useState<boolean>(false);
   const [newTaskText, setNewTaskText] = useState<string>("");
-  const [newTaskAssignee, setNewTaskAssignee] = useState<string>("Rohith");
+  const [newTaskAssignee, setNewTaskAssignee] = useState<string>("");
   const [newTaskDeadline, setNewTaskDeadline] = useState<string>("Tomorrow at 5:00 PM");
   const [isSubmittingTask, setIsSubmittingTask] = useState<boolean>(false);
+
+  // Check saved session on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("aegis_auth_user");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        setCurrentUser(parsed);
+        setActiveProfileView(parsed.name || "Rohith");
+      }
+    } catch (e) {
+      console.error("Failed to load saved session:", e);
+    }
+  }, []);
 
   // Fetch Participants
   const fetchParticipants = useCallback(async () => {
@@ -118,29 +153,27 @@ export default function AegisMeetDashboard() {
       const res = await axios.get(`${PROXY_URL}/api/participants`);
       if (Array.isArray(res.data) && res.data.length > 0) {
         setParticipants(res.data);
-        if (!res.data.includes(selectedUser)) {
-          setSelectedUser(res.data[0]);
-        }
       }
     } catch (e) {
       console.error("Failed to fetch participants:", e);
     }
-  }, [selectedUser]);
+  }, []);
 
-  // Fetch User Dashboard Data
-  const fetchUserDashboard = useCallback(async (user: string) => {
+  // Fetch User Dashboard Data for a specific participant
+  const fetchUserDashboard = useCallback(async (targetName: string) => {
+    if (!targetName) return;
     setLoadingUser(true);
     try {
-      const res = await axios.get(`${PROXY_URL}/api/user/${encodeURIComponent(user)}/dashboard`);
+      const res = await axios.get(`${PROXY_URL}/api/user/${encodeURIComponent(targetName)}/dashboard`);
       setUserData(res.data);
     } catch (e) {
-      console.error(`Failed to fetch dashboard for ${user}:`, e);
+      console.error(`Failed to fetch dashboard for ${targetName}:`, e);
     } finally {
       setLoadingUser(false);
     }
   }, []);
 
-  // Fetch All Tasks & Meeting Summary
+  // Fetch Global Tasks & Summary
   const fetchGlobalData = useCallback(async () => {
     try {
       const [tasksRes, meetingRes] = await Promise.all([
@@ -160,30 +193,104 @@ export default function AegisMeetDashboard() {
       const res = await axios.get(`${PROXY_URL}/api/bot/status`);
       setBotStatus(res.data);
     } catch (e) {
-      // Backend might be restarting
+      // Server may be busy or reloading
     }
   }, []);
 
-  // Initial load
+  // Sync profile view with active user role
   useEffect(() => {
-    fetchParticipants();
-    fetchGlobalData();
-  }, [fetchParticipants, fetchGlobalData]);
+    if (currentUser) {
+      fetchParticipants();
+      fetchGlobalData();
+      if (currentUser.role === "user") {
+        // Regular users can only view their own profile
+        setActiveProfileView(currentUser.name);
+        setShowTeamOverview(false);
+        setNewTaskAssignee(currentUser.name);
+      } else {
+        // Admin defaults to their own profile or first available
+        setNewTaskAssignee(activeProfileView);
+      }
+    }
+  }, [currentUser, fetchParticipants, fetchGlobalData, activeProfileView]);
 
-  // When selectedUser changes
+  // Load dashboard when activeProfileView changes
   useEffect(() => {
-    fetchUserDashboard(selectedUser);
-    setNewTaskAssignee(selectedUser);
-  }, [selectedUser, fetchUserDashboard]);
+    if (currentUser && activeProfileView) {
+      fetchUserDashboard(activeProfileView);
+    }
+  }, [currentUser, activeProfileView, fetchUserDashboard]);
 
-  // Periodic polling for bot
+  // Periodic bot polling
   useEffect(() => {
+    if (!currentUser) return;
     pollBotStatus();
-    const interval = setInterval(() => {
-      pollBotStatus();
-    }, 4000);
+    const interval = setInterval(pollBotStatus, 3500);
     return () => clearInterval(interval);
-  }, [pollBotStatus]);
+  }, [currentUser, pollBotStatus]);
+
+  // Login handler
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail.trim() || !authPassword.trim()) {
+      setAuthError("Please provide both email and password.");
+      return;
+    }
+    setIsSubmittingAuth(true);
+    setAuthError(null);
+    try {
+      const res = await axios.post(`${PROXY_URL}/api/auth/login`, {
+        email: authEmail.trim(),
+        password: authPassword.trim(),
+      });
+      const user = res.data.user;
+      setCurrentUser(user);
+      setActiveProfileView(user.name);
+      localStorage.setItem("aegis_auth_user", JSON.stringify(user));
+      if (res.data.token) {
+        localStorage.setItem("aegis_auth_token", res.data.token);
+      }
+    } catch (err: any) {
+      setAuthError(err.response?.data?.detail || "Authentication failed. Please verify your credentials.");
+    } finally {
+      setIsSubmittingAuth(false);
+    }
+  };
+
+  // Quick Demo Login Shortcut
+  const handleQuickDemoLogin = async (email: string, pass: string) => {
+    setAuthEmail(email);
+    setAuthPassword(pass);
+    setIsSubmittingAuth(true);
+    setAuthError(null);
+    try {
+      const res = await axios.post(`${PROXY_URL}/api/auth/login`, {
+        email: email,
+        password: pass,
+      });
+      const user = res.data.user;
+      setCurrentUser(user);
+      setActiveProfileView(user.name);
+      localStorage.setItem("aegis_auth_user", JSON.stringify(user));
+      if (res.data.token) {
+        localStorage.setItem("aegis_auth_token", res.data.token);
+      }
+    } catch (err: any) {
+      setAuthError(err.response?.data?.detail || "Demo sign-in failed.");
+    } finally {
+      setIsSubmittingAuth(false);
+    }
+  };
+
+  // Logout handler
+  const handleLogout = () => {
+    setCurrentUser(null);
+    localStorage.removeItem("aegis_auth_user");
+    localStorage.removeItem("aegis_auth_token");
+    setAuthEmail("");
+    setAuthPassword("");
+    setUserData(null);
+  };
 
   // Toggle Task Status (Completed <-> Pending)
   const handleToggleTaskStatus = async (task: TaskItem) => {
@@ -213,17 +320,15 @@ export default function AegisMeetDashboard() {
       });
     }
 
-    // Update in allTeamTasks
     setAllTeamTasks((prev) =>
       prev.map((t) => (t.id === task.id ? { ...t, status: nextStatus as "completed" | "pending" } : t))
     );
 
-    // Call backend endpoint
     try {
       await axios.patch(`${PROXY_URL}/api/tasks/${task.id}`, { status: nextStatus });
     } catch (e) {
       console.error("Failed to update task status:", e);
-      fetchUserDashboard(selectedUser);
+      fetchUserDashboard(activeProfileView);
     }
   };
 
@@ -233,15 +338,20 @@ export default function AegisMeetDashboard() {
     if (!newTaskText.trim()) return;
 
     setIsSubmittingTask(true);
+    const targetAssignee = newTaskAssignee.trim() || activeProfileView;
     try {
       await axios.post(`${PROXY_URL}/api/tasks`, {
         task: newTaskText.trim(),
-        assignee: newTaskAssignee.trim() || selectedUser,
+        assignee: targetAssignee,
         deadline: newTaskDeadline.trim() || "Tomorrow",
       });
       setNewTaskText("");
       setIsAddingTask(false);
-      await Promise.all([fetchUserDashboard(selectedUser), fetchGlobalData(), fetchParticipants()]);
+      await Promise.all([
+        fetchUserDashboard(activeProfileView),
+        fetchGlobalData(),
+        fetchParticipants(),
+      ]);
     } catch (e) {
       console.error("Failed to create task:", e);
     } finally {
@@ -253,7 +363,7 @@ export default function AegisMeetDashboard() {
   const handleDeleteTask = async (taskId: number) => {
     try {
       await axios.delete(`${PROXY_URL}/api/tasks/${taskId}`);
-      await Promise.all([fetchUserDashboard(selectedUser), fetchGlobalData()]);
+      await Promise.all([fetchUserDashboard(activeProfileView), fetchGlobalData()]);
     } catch (e) {
       console.error("Failed to delete task:", e);
     }
@@ -286,13 +396,13 @@ export default function AegisMeetDashboard() {
       await axios.post(`${PROXY_URL}/api/bot/leave`);
       setTimeout(async () => {
         await Promise.all([
-          fetchUserDashboard(selectedUser),
+          fetchUserDashboard(activeProfileView),
           fetchGlobalData(),
           fetchParticipants(),
           pollBotStatus(),
         ]);
         setIsLeaving(false);
-        setBotMessage("Meeting finalized! Personalized action items and alerts updated.");
+        setBotMessage("Meeting finalized! Personalized action items and alerts refreshed.");
       }, 3000);
     } catch (e: any) {
       setIsLeaving(false);
@@ -300,8 +410,173 @@ export default function AegisMeetDashboard() {
     }
   };
 
-  // Filter user tasks
-  const filteredUserTasks = (userData?.tasks || []).filter((task) => {
+  // ============================================================================
+  // VIEW 1: AUTHENTICATION LOGIN PORTAL (When not logged in)
+  // ============================================================================
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-center items-center px-4 sm:px-6 lg:px-8 relative overflow-hidden font-sans selection:bg-emerald-500/30">
+        {/* Ambient background glows */}
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-emerald-500/10 rounded-full blur-[120px] pointer-events-none"></div>
+        <div className="absolute bottom-10 right-1/4 w-[400px] h-[400px] bg-teal-500/5 rounded-full blur-[100px] pointer-events-none"></div>
+
+        <div className="max-w-md w-full space-y-8 relative z-10">
+          {/* Product Header */}
+          <div className="text-center space-y-3">
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-400 shadow-xl shadow-emerald-500/25 mb-2">
+              <ShieldCheck className="w-9 h-9 text-slate-950 stroke-[2.5]" />
+            </div>
+            <h1 className="text-3xl font-extrabold tracking-tight text-white">AegisMeet</h1>
+            <p className="text-xs text-slate-400 max-w-sm mx-auto">
+              Privacy-Preserving Intelligent Meeting Companion & Personalized Action Portals
+            </p>
+          </div>
+
+          {/* Login Form Card */}
+          <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-7 shadow-2xl backdrop-blur-xl space-y-6">
+            <div className="border-b border-slate-800/80 pb-3">
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Lock className="w-4 h-4 text-emerald-400" />
+                Sign In to Your Workspace
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Each participant accesses their isolated portal with personal alerts and tasks.
+              </p>
+            </div>
+
+            {authError && (
+              <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-800/60 text-rose-300 text-xs flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-400 flex-shrink-0 mt-0.5" />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                  Gmail / Email Address
+                </label>
+                <div className="relative">
+                  <Mail className="w-4 h-4 text-slate-500 absolute left-3.5 top-3 pointer-events-none" />
+                  <input
+                    type="email"
+                    required
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="name@gmail.com"
+                    className="w-full pl-10 pr-3.5 py-2.5 text-xs rounded-xl bg-slate-950 border border-slate-700/80 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                  Password
+                </label>
+                <div className="relative">
+                  <KeyRound className="w-4 h-4 text-slate-500 absolute left-3.5 top-3 pointer-events-none" />
+                  <input
+                    type="password"
+                    required
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="w-full pl-10 pr-3.5 py-2.5 text-xs rounded-xl bg-slate-950 border border-slate-700/80 text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition-colors"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmittingAuth}
+                className="w-full py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs tracking-wide shadow-lg shadow-emerald-500/25 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                <span>{isSubmittingAuth ? "Authenticating..." : "Sign In to Workspace"}</span>
+                <ArrowRight className="w-4 h-4 stroke-[2.5]" />
+              </button>
+            </form>
+
+            {/* Quick 1-Click Demo Logins */}
+            <div className="pt-4 border-t border-slate-800 space-y-3">
+              <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider text-center">
+                Or Quick Sign-In With Demo Accounts
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleQuickDemoLogin("rohith@gmail.com", "rohith123")}
+                  className="px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700/80 text-xs font-medium text-slate-200 text-left transition-colors flex items-center gap-2"
+                >
+                  <span className="w-6 h-6 rounded-lg bg-emerald-500/20 text-emerald-400 font-bold flex items-center justify-center text-[11px]">
+                    R
+                  </span>
+                  <div>
+                    <div className="font-semibold text-white">Rohith</div>
+                    <div className="text-[10px] text-slate-400">User Portal</div>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleQuickDemoLogin("mayank@gmail.com", "mayank123")}
+                  className="px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700/80 text-xs font-medium text-slate-200 text-left transition-colors flex items-center gap-2"
+                >
+                  <span className="w-6 h-6 rounded-lg bg-blue-500/20 text-blue-400 font-bold flex items-center justify-center text-[11px]">
+                    M
+                  </span>
+                  <div>
+                    <div className="font-semibold text-white">Mayank</div>
+                    <div className="text-[10px] text-slate-400">User Portal</div>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleQuickDemoLogin("sambhav@gmail.com", "sambhav123")}
+                  className="px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700/80 text-xs font-medium text-slate-200 text-left transition-colors flex items-center gap-2"
+                >
+                  <span className="w-6 h-6 rounded-lg bg-purple-500/20 text-purple-400 font-bold flex items-center justify-center text-[11px]">
+                    S
+                  </span>
+                  <div>
+                    <div className="font-semibold text-white">Sambhav</div>
+                    <div className="text-[10px] text-slate-400">User Portal</div>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleQuickDemoLogin("admin@gmail.com", "admin123")}
+                  className="px-3 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-xs font-medium text-amber-300 text-left transition-colors flex items-center gap-2"
+                >
+                  <span className="w-6 h-6 rounded-lg bg-amber-500/20 text-amber-400 font-bold flex items-center justify-center text-[11px]">
+                    <Crown className="w-3.5 h-3.5" />
+                  </span>
+                  <div>
+                    <div className="font-bold text-amber-300">Admin</div>
+                    <div className="text-[10px] text-amber-400/70">Full Access</div>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="text-center text-xs text-slate-500">
+            🔒 Protected by Local Zero-Leak Proxy Architecture & Localhost Storage
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // VIEW 2 & 3: AUTHENTICATED APPLICATION (User Isolated View or Admin Full View)
+  // ============================================================================
+  const isAdmin = currentUser.role === "admin";
+  const displayedUser = isAdmin && showTeamOverview ? "All Team" : activeProfileView;
+
+  // Filter tasks for the active view
+  const filteredTasks = (userData?.tasks || []).filter((task) => {
     if (taskFilter === "pending") return task.status !== "completed";
     if (taskFilter === "completed") return task.status === "completed";
     return true;
@@ -320,69 +595,71 @@ export default function AegisMeetDashboard() {
             <div>
               <div className="flex items-center space-x-2">
                 <span className="font-bold text-lg tracking-tight text-white">AegisMeet</span>
-                <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  Zero-Leak Local Proxy
-                </span>
+                {isAdmin ? (
+                  <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                    <Crown className="w-3 h-3" />
+                    Admin Console
+                  </span>
+                ) : (
+                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Zero-Leak Local Proxy
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-400 hidden sm:block">
-                Privacy-Preserving Meeting Intelligence & Personalized Workspaces
+                {isAdmin
+                  ? "Admin View: Full team monitoring & cross-functional workspace"
+                  : `Personalized Meeting Portal for ${currentUser.name}`}
               </p>
             </div>
           </div>
 
-          {/* Participant Portal Switcher */}
+          {/* Right Navigation Elements */}
           <div className="flex items-center space-x-3">
-            <div className="hidden md:flex items-center text-xs font-medium text-slate-400 gap-1.5">
-              <Users className="w-3.5 h-3.5 text-slate-400" />
-              <span>Participant Portal:</span>
-            </div>
-            <div className="flex items-center bg-slate-800/90 p-1 rounded-xl border border-slate-700/60 shadow-inner">
-              {participants.map((person) => {
-                const isActive = selectedUser.toLowerCase() === person.toLowerCase();
-                return (
-                  <button
-                    key={person}
-                    onClick={() => {
-                      setSelectedUser(person);
-                      setShowTeamOverview(false);
-                    }}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 ${
-                      isActive && !showTeamOverview
-                        ? "bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 shadow-md font-bold"
-                        : "text-slate-300 hover:text-white hover:bg-slate-700/50"
-                    }`}
-                  >
-                    <span
-                      className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] ${
-                        isActive && !showTeamOverview
-                          ? "bg-slate-950 text-emerald-400 font-black"
-                          : "bg-slate-700 text-slate-300"
+            {/* ADMIN ONLY: Switcher between team members or team overview */}
+            {isAdmin && (
+              <div className="flex items-center bg-slate-800/90 p-1 rounded-xl border border-slate-700/60 shadow-inner">
+                <span className="text-[11px] font-semibold text-slate-400 px-2 hidden lg:inline">
+                  Viewing:
+                </span>
+                {participants.map((person) => {
+                  const isActive = activeProfileView.toLowerCase() === person.toLowerCase() && !showTeamOverview;
+                  return (
+                    <button
+                      key={person}
+                      onClick={() => {
+                        setActiveProfileView(person);
+                        setShowTeamOverview(false);
+                      }}
+                      className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                        isActive
+                          ? "bg-gradient-to-r from-emerald-500 to-teal-500 text-slate-950 font-bold shadow-md"
+                          : "text-slate-300 hover:text-white hover:bg-slate-700/50"
                       }`}
                     >
-                      {person.charAt(0).toUpperCase()}
-                    </span>
-                    {person}
-                  </button>
-                );
-              })}
-              <button
-                onClick={() => setShowTeamOverview(true)}
-                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all duration-150 ${
-                  showTeamOverview
-                    ? "bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-md font-bold"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-700/40"
-                }`}
-                title="View All Team Tasks"
-              >
-                All Team
-              </button>
-            </div>
+                      {person}
+                    </button>
+                  );
+                })}
+                <button
+                  onClick={() => setShowTeamOverview(true)}
+                  className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    showTeamOverview
+                      ? "bg-gradient-to-r from-blue-500 to-indigo-500 text-white font-bold shadow-md"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-700/40"
+                  }`}
+                  title="View All Team Tasks"
+                >
+                  All Team
+                </button>
+              </div>
+            )}
 
-            {/* Refresh Button */}
+            {/* Refresh Data */}
             <button
               onClick={() => {
-                fetchUserDashboard(selectedUser);
+                fetchUserDashboard(activeProfileView);
                 fetchGlobalData();
                 fetchParticipants();
               }}
@@ -391,16 +668,40 @@ export default function AegisMeetDashboard() {
             >
               <RefreshCw className="w-4 h-4" />
             </button>
+
+            {/* User Profile & Logout */}
+            <div className="flex items-center gap-2.5 pl-2 border-l border-slate-800">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-xs">
+                  {currentUser.name.charAt(0).toUpperCase()}
+                </div>
+                <div className="hidden md:block text-left">
+                  <div className="text-xs font-bold text-white leading-tight">
+                    {currentUser.name}
+                  </div>
+                  <div className="text-[10px] text-slate-400 leading-tight">
+                    {currentUser.email}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={handleLogout}
+                className="p-2 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors"
+                title="Log Out"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
       </header>
 
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-        {/* Real Google Meet Assistant Live Controller */}
+        {/* Google Meet Assistant Live Controller */}
         <section className="bg-gradient-to-r from-slate-900/90 via-slate-900 to-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl shadow-slate-950/40">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-            {/* Left: Status & Context */}
             <div className="flex items-start sm:items-center gap-3">
               <div
                 className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
@@ -413,11 +714,11 @@ export default function AegisMeetDashboard() {
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <h2 className="text-sm font-semibold text-white">Google Meet Live Notetaker</h2>
+                  <h2 className="text-sm font-semibold text-white">Google Meet Live Assistant</h2>
                   {botStatus.active ? (
                     <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/30">
                       <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping"></span>
-                      In Meeting ({botStatus.captions_captured} live caption chunks)
+                      In Meeting ({botStatus.captions_captured} caption chunks captured)
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-slate-800 text-slate-400 border border-slate-700/50">
@@ -427,13 +728,12 @@ export default function AegisMeetDashboard() {
                 </div>
                 <p className="text-xs text-slate-400 mt-0.5">
                   {botStatus.active
-                    ? `Connected to: ${botStatus.meet_url || "Active Call"} • Scrubbing PII on localhost before any reasoning.`
-                    : "Join any live Google Meet link. Captures CC transcript, extracts personalized action items, and generates alerts."}
+                    ? `Active in: ${botStatus.meet_url || "Google Meet Call"} • Real-time continuous captions and PII scrubbing on localhost.`
+                    : "Enter any Google Meet URL. Captures live speech chunks, detects deadlines, and automatically routes alerts."}
                 </p>
               </div>
             </div>
 
-            {/* Right: Actions */}
             <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
               {botStatus.active ? (
                 <button
@@ -466,7 +766,6 @@ export default function AegisMeetDashboard() {
             </div>
           </div>
 
-          {/* Feedback message banner */}
           {botMessage && (
             <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs text-emerald-400 font-medium">
               <span className="flex items-center gap-1.5">
@@ -483,34 +782,35 @@ export default function AegisMeetDashboard() {
           )}
         </section>
 
-        {/* Personalized Workspace Header / Banner */}
+        {/* Personalized User Workspace Header (For regular user or selected user in Admin view) */}
         {!showTeamOverview ? (
           <section className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-6 relative overflow-hidden backdrop-blur-sm">
             <div className="absolute top-0 right-0 w-96 h-96 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none"></div>
 
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6 relative z-10">
-              {/* Profile Intro */}
               <div className="flex items-center gap-4">
                 <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center text-slate-950 font-black text-2xl shadow-xl shadow-emerald-500/20">
-                  {selectedUser.charAt(0).toUpperCase()}
+                  {displayedUser.charAt(0).toUpperCase()}
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
                     <h1 className="text-xl font-bold text-white tracking-tight">
-                      {selectedUser}&apos;s Workspace
+                      {displayedUser}&apos;s Personalized Portal
                     </h1>
-                    <span className="px-2 py-0.5 text-[11px] font-semibold rounded-md bg-slate-800 text-slate-300 border border-slate-700">
-                      Meeting Participant
-                    </span>
+                    {isAdmin && (
+                      <span className="px-2 py-0.5 text-[10px] font-bold rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        Admin Viewing
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-400 mt-1 max-w-xl">
                     {userData?.personalized_briefing ||
-                      `Tailored updates, upcoming deliverables, and assigned action items from your team meetings.`}
+                      `Tailored updates, upcoming deadlines, and assigned action items from your team meetings.`}
                   </p>
                 </div>
               </div>
 
-              {/* KPI Stat Badges */}
+              {/* KPI Badges */}
               <div className="grid grid-cols-3 gap-3">
                 <div className="bg-slate-950/70 border border-slate-800/90 rounded-xl px-4 py-3 text-center min-w-[90px]">
                   <div className="text-xl font-extrabold text-amber-400">
@@ -540,32 +840,33 @@ export default function AegisMeetDashboard() {
             </div>
           </section>
         ) : (
+          /* Admin Cross-Functional Team Overview Banner */
           <section className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-6 backdrop-blur-sm">
             <div className="flex items-center justify-between">
               <div>
                 <h1 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
                   <Users className="w-5 h-5 text-blue-400" />
-                  Team Cross-Functional Overview
+                  Admin: Team Cross-Functional Overview
                 </h1>
                 <p className="text-xs text-slate-400 mt-1">
-                  Consolidated view of all action items, assignees, and deadlines across the entire team.
+                  Comprehensive overview of all action items, assignees, and deadlines across the entire engineering team.
                 </p>
               </div>
               <div className="text-xs text-slate-400 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700">
-                Total Tasks: <span className="font-bold text-white">{allTeamTasks.length}</span>
+                Total Team Deliverables: <span className="font-bold text-white">{allTeamTasks.length}</span>
               </div>
             </div>
           </section>
         )}
 
-        {/* High-Priority Alerts Section (Only for Individual User View) */}
+        {/* High-Priority Alerts Section (Only for Individual Profile View) */}
         {!showTeamOverview && (
           <section className="space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Bell className="w-4 h-4 text-amber-400" />
                 <h2 className="text-sm font-bold uppercase tracking-wider text-slate-200">
-                  Personalized Alerts for {selectedUser}
+                  Priority Alerts for {displayedUser}
                 </h2>
               </div>
               <span className="text-xs text-slate-400">
@@ -581,7 +882,7 @@ export default function AegisMeetDashboard() {
             ) : !userData?.alerts || userData.alerts.length === 0 ? (
               <div className="bg-slate-900/30 border border-slate-800/70 rounded-xl p-6 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                <span>All clear! No urgent alerts or overdue action items for {selectedUser}.</span>
+                <span>All clear! No urgent alerts or overdue deliverables for {displayedUser}.</span>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
@@ -633,7 +934,6 @@ export default function AegisMeetDashboard() {
                       </div>
                     </div>
 
-                    {/* Quick Complete Action */}
                     <button
                       onClick={() => {
                         const targetTask = userData.tasks.find((t) => t.id === alert.task_id);
@@ -653,15 +953,15 @@ export default function AegisMeetDashboard() {
           </section>
         )}
 
-        {/* Main Grid: Action Items & Meeting Summary */}
+        {/* Main Grid: Action Items & Sync Digest */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Left Column: Action Items & Task Tracker (2 Cols) */}
+          {/* Left Column: Action Items Checklist (2 Cols) */}
           <div className="lg:col-span-2 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-1">
               <div className="flex items-center gap-2">
                 <ListTodo className="w-4 h-4 text-emerald-400" />
                 <h2 className="text-sm font-bold uppercase tracking-wider text-slate-200">
-                  {showTeamOverview ? "All Team Action Items" : `${selectedUser}'s Assigned Action Items`}
+                  {showTeamOverview ? "All Team Deliverables" : `${displayedUser}'s Assigned Action Items`}
                 </h2>
               </div>
 
@@ -695,7 +995,6 @@ export default function AegisMeetDashboard() {
                   </div>
                 )}
 
-                {/* Add Task Toggle Button */}
                 <button
                   onClick={() => setIsAddingTask(!isAddingTask)}
                   className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-semibold border border-emerald-500/30 transition-colors"
@@ -772,13 +1071,13 @@ export default function AegisMeetDashboard() {
               </form>
             )}
 
-            {/* Task List */}
+            {/* Task Checklist */}
             <div className="space-y-2.5">
               {showTeamOverview ? (
                 /* Team Overview List */
                 allTeamTasks.length === 0 ? (
                   <div className="bg-slate-900/30 border border-slate-800 rounded-xl p-8 text-center text-xs text-slate-400">
-                    No tasks found in system.
+                    No tasks found across the team.
                   </div>
                 ) : (
                   allTeamTasks.map((task) => (
@@ -822,13 +1121,15 @@ export default function AegisMeetDashboard() {
                         </div>
                       </div>
 
-                      <button
-                        onClick={() => handleDeleteTask(task.id)}
-                        className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-rose-400 p-1 transition-opacity"
-                        title="Delete task"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDeleteTask(task.id)}
+                          className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-rose-400 p-1 transition-opacity"
+                          title="Delete task"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   ))
                 )
@@ -838,12 +1139,12 @@ export default function AegisMeetDashboard() {
                   <div className="bg-slate-900/30 border border-slate-800 rounded-xl p-8 text-center text-xs text-slate-400 animate-pulse">
                     Loading action items...
                   </div>
-                ) : filteredUserTasks.length === 0 ? (
+                ) : filteredTasks.length === 0 ? (
                   <div className="bg-slate-900/30 border border-slate-800 rounded-xl p-8 text-center text-xs text-slate-400">
-                    No {taskFilter !== "all" ? taskFilter : ""} action items assigned to {selectedUser}.
+                    No {taskFilter !== "all" ? taskFilter : ""} action items assigned to {displayedUser}.
                   </div>
                 ) : (
-                  filteredUserTasks.map((task) => (
+                  filteredTasks.map((task) => (
                     <div
                       key={task.id}
                       className={`group bg-slate-900/50 hover:bg-slate-900/90 border rounded-xl p-3.5 flex items-start justify-between gap-3 transition-all ${
@@ -911,36 +1212,13 @@ export default function AegisMeetDashboard() {
               <div className="flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-teal-400" />
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                  Personalized Sync Briefing
+                  Sync Digest for {displayedUser}
                 </h3>
               </div>
               <p className="text-xs text-slate-300 leading-relaxed font-normal">
                 {userData?.personalized_briefing ||
-                  `In today's sync, key deliverables were aligned for ${selectedUser}. You have active action items requiring attention.`}
+                  `In today's sync, key deliverables were aligned for ${displayedUser}. You have active action items requiring attention.`}
               </p>
-              <div className="pt-2 border-t border-slate-800/80">
-                <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2">
-                  Active Team Assignees
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {participants.map((name) => (
-                    <button
-                      key={name}
-                      onClick={() => {
-                        setSelectedUser(name);
-                        setShowTeamOverview(false);
-                      }}
-                      className={`text-xs px-2.5 py-1 rounded-md border transition-colors ${
-                        selectedUser.toLowerCase() === name.toLowerCase() && !showTeamOverview
-                          ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-bold"
-                          : "bg-slate-800/80 text-slate-400 border-slate-700/60 hover:text-slate-200"
-                      }`}
-                    >
-                      👤 {name}
-                    </button>
-                  ))}
-                </div>
-              </div>
             </div>
 
             {/* Team Meeting Notes / Executive Summary */}
@@ -959,13 +1237,13 @@ export default function AegisMeetDashboard() {
 
               <div className="text-xs text-slate-300 leading-relaxed">
                 {meetingSummary?.meeting_summary ||
-                  "Meeting sync recorded. Tasks extracted and assigned across engineering workstreams with full PII scrubbing."}
+                  "Meeting sync recorded. Tasks extracted and assigned across engineering workstreams with full local PII scrubbing."}
               </div>
 
               {meetingSummary?.key_topics && meetingSummary.key_topics.length > 0 && (
                 <div className="pt-3 border-t border-slate-800/80 space-y-1.5">
                   <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                    Key Discussion Topics
+                    Key Topics
                   </div>
                   <ul className="space-y-1 text-xs text-slate-400">
                     {meetingSummary.key_topics.map((topic, idx) => (
@@ -983,11 +1261,11 @@ export default function AegisMeetDashboard() {
             <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5">
               <div className="flex items-center gap-2 text-xs font-bold text-emerald-400">
                 <ShieldCheck className="w-4 h-4" />
-                <span>Zero-Leak Guarantee</span>
+                <span>Zero-Leak Local Guarantee</span>
               </div>
               <p className="text-[11px] text-slate-400 leading-relaxed">
-                Meeting audio & transcripts are scrubbed on localhost using Presidio before any cloud reasoning.
-                Personal identities are rehydrated in your browser so raw names never leave your machine.
+                All meeting audio & captions are sanitized on localhost using Microsoft Presidio.
+                Your real identities are rehydrated in-browser so raw names never leave your device.
               </p>
             </div>
           </div>
