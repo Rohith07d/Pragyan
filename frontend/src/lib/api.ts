@@ -1,6 +1,9 @@
 import axios from "axios";
 
-export const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL || "http://localhost:8000";
+export const PROXY_URL =
+  process.env.NEXT_PUBLIC_PROXY_URL ||
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  "http://localhost:8000";
 
 export const api = axios.create({
   baseURL: PROXY_URL,

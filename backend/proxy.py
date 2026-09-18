@@ -579,9 +579,11 @@ def generate_fallback_aliases(canonical_name: str) -> List[str]:
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     cursor = conn.cursor()
     cursor.execute("PRAGMA foreign_keys = ON;")
+    cursor.execute("PRAGMA journal_mode = WAL;")
+    cursor.execute("PRAGMA busy_timeout = 30000;")
 
     # 1. Users (id, canonical_name, password_hash, role)
     cursor.execute("PRAGMA table_info(Users)")
@@ -1515,10 +1517,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Enable CORS for Next.js dashboard
+# Enable CORS for Next.js dashboard, Vercel deployments, and secure remote tunnels
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
+    allow_origin_regex=r"^https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
