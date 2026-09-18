@@ -177,3 +177,36 @@ def test_intake_caption_streaming_endpoint(client: TestClient):
     assert latest["speaker"] == "Rohith"
     assert payload["caption"] in latest["caption"]
     assert "masked_preview" in latest
+
+
+def test_session_transcript_accumulation_in_memory(client: TestClient):
+    """
+    Phase 3: Verify POST /intake accumulates chunks into session buffer
+    without sending data to the LLM immediately.
+    """
+    from proxy import get_meeting_buffer, wipe_meeting_buffer
+
+    test_mid = 888
+    wipe_meeting_buffer(test_mid)
+
+    chunks = [
+        {"speaker": "Mayank", "caption": "Good morning team.", "meeting_id": test_mid},
+        {"speaker": "Rohith", "caption": "I am working on the database indexing.", "meeting_id": test_mid},
+        {"speaker": "Mayank", "caption": "Sounds good, please deliver by Friday.", "meeting_id": test_mid},
+    ]
+
+    for c in chunks:
+        r = client.post("/api/intake", json=c)
+        assert r.status_code == 200
+        data = r.json()
+        assert data["buffer_status"] == "accumulated"
+
+    # Verify buffer in RAM
+    buf = get_meeting_buffer(test_mid)
+    assert len(buf) == 3
+    assert "Mayank: Good morning team." in buf[0]
+    assert "Rohith: I am working on the database indexing." in buf[1]
+
+    # Clean up
+    wipe_meeting_buffer(test_mid)
+    assert len(get_meeting_buffer(test_mid)) == 0

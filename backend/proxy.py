@@ -21,7 +21,7 @@ import hashlib
 import uuid
 import jwt
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -69,6 +69,31 @@ _ACTIVE_MEETING_CONFIG: Dict[str, Any] = {
     "share_technical_summary": True,
     "meeting_purpose": "AegisMeet Meeting",
 }
+
+# Phase 3: In-Memory Session Transcript Buffers mapped to meeting_id
+MEETING_TRANSCRIPT_BUFFERS: Dict[str, List[str]] = {}
+
+
+def append_to_meeting_buffer(meeting_id: Any, text: str):
+    """Accumulates incoming caption clusters into an in-memory session buffer for the given meeting."""
+    mid = str(meeting_id if meeting_id is not None else (_ACTIVE_MEETING_CONFIG.get("meeting_id") or "default"))
+    if mid not in MEETING_TRANSCRIPT_BUFFERS:
+        MEETING_TRANSCRIPT_BUFFERS[mid] = []
+    MEETING_TRANSCRIPT_BUFFERS[mid].append(text)
+
+
+def get_meeting_buffer(meeting_id: Any = None) -> List[str]:
+    """Returns the accumulated in-memory transcript chunks for the given meeting."""
+    mid = str(meeting_id if meeting_id is not None else (_ACTIVE_MEETING_CONFIG.get("meeting_id") or "default"))
+    return list(MEETING_TRANSCRIPT_BUFFERS.get(mid, []))
+
+
+def wipe_meeting_buffer(meeting_id: Any = None):
+    """Deletes the raw transcript buffer from RAM immediately upon meeting end / batch processing."""
+    mid = str(meeting_id if meeting_id is not None else (_ACTIVE_MEETING_CONFIG.get("meeting_id") or "default"))
+    if mid in MEETING_TRANSCRIPT_BUFFERS:
+        del MEETING_TRANSCRIPT_BUFFERS[mid]
+    logger.info(f"Raw transcript buffer for meeting '{mid}' aggressively wiped from RAM.")
 
 
 def wipe_ephemeral_ram():
@@ -947,9 +972,10 @@ async def generate_phonetic_aliases(canonical_name: str) -> List[str]:
     might produce in a meeting.
     """
     prompt_text = (
-        f'You are an expert in speech-to-text error modeling. Given the canonical name "{canonical_name}", '
-        f'generate 15 common phonetic misspellings, transcription errors, or separated syllables that '
-        f'an automated speech recognition (ASR) system might produce in a meeting. Output strictly a JSON array of strings.'
+        f"You are an expert at analyzing speech-to-text engine failures. "
+        f"Generate a JSON array of 15 common phonetic misspellings, transcription errors, or separated syllables "
+        f"that automated closed captions might output when hearing the name '{canonical_name}'. "
+        f"Return ONLY the raw JSON array of strings."
     )
 
     if not FEATHERLESS_API_KEY:
@@ -1410,7 +1436,7 @@ class TranscriptPayload(BaseModel):
 class IntakePayload(BaseModel):
     speaker: Optional[str] = None
     caption: str = Field(..., description="Live caption chunk from Playwright bot")
-    meeting_id: Optional[str] = "default"
+    meeting_id: Optional[Union[int, str]] = "default"
 
 
 class JoinMeetingPayload(BaseModel):
@@ -2068,16 +2094,22 @@ def normalize_endpoint(payload: NormalizePayload):
 async def bot_intake_endpoint(payload: IntakePayload):
     """
     Intake endpoint called by the headless Playwright bot as captions stream in.
+    Phase 3: Accumulates the incoming text clusters into an in-memory session buffer mapped to active meeting ID.
+    Does NOT send data to the LLM immediately.
     """
     global _LIVE_INTAKE_FEED
     raw_caption = f"{payload.speaker}: {payload.caption}" if payload.speaker else payload.caption
+    mid = payload.meeting_id or _ACTIVE_MEETING_CONFIG.get("meeting_id") or "default"
+    append_to_meeting_buffer(mid, raw_caption)
+
     preview_mask = mask_transcript(
         payload.caption,
         expected_participants=_ACTIVE_MEETING_CONFIG.get("expected_participants"),
     )["masked_text"]
-    logger.info(f"[INTAKE STREAM] RAW: {raw_caption} | MASKED PREVIEW: {preview_mask}")
+    logger.info(f"[INTAKE BUFFER] Meeting '{mid}' accumulated chunk: {raw_caption[:80]}... (Total in buffer: {len(get_meeting_buffer(mid))})")
     entry = {
         "timestamp": datetime.now().isoformat(),
+        "meeting_id": str(mid),
         "speaker": payload.speaker or "Participant",
         "caption": payload.caption,
         "masked_preview": preview_mask,
@@ -2085,7 +2117,13 @@ async def bot_intake_endpoint(payload: IntakePayload):
     _LIVE_INTAKE_FEED.append(entry)
     if len(_LIVE_INTAKE_FEED) > 100:
         _LIVE_INTAKE_FEED = _LIVE_INTAKE_FEED[-100:]
-    return {"status": "received", "length": len(payload.caption)}
+    return {
+        "status": "received",
+        "buffer_status": "accumulated",
+        "meeting_id": str(mid),
+        "buffer_size": len(get_meeting_buffer(mid)),
+        "length": len(payload.caption),
+    }
 
 
 @app.post("/api/mask")
