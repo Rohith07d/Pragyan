@@ -474,15 +474,31 @@ def init_db():
         )
     """)
 
-    # 3. Meetings (id, purpose, scheduled_time, config_flags)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS Meetings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            purpose TEXT,
-            scheduled_time TEXT,
-            config_flags TEXT
-        )
-    """)
+    # 3. Meetings (id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status)
+    cursor.execute("PRAGMA table_info(Meetings)")
+    meet_cols = [row[1] for row in cursor.fetchall()]
+    if not meet_cols:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS Meetings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                purpose TEXT,
+                scheduled_time TEXT,
+                config_flags TEXT,
+                pm_view TEXT,
+                group_view TEXT,
+                absent_view TEXT,
+                status TEXT DEFAULT 'scheduled'
+            )
+        """)
+    else:
+        if "pm_view" not in meet_cols:
+            cursor.execute("ALTER TABLE Meetings ADD COLUMN pm_view TEXT")
+        if "group_view" not in meet_cols:
+            cursor.execute("ALTER TABLE Meetings ADD COLUMN group_view TEXT")
+        if "absent_view" not in meet_cols:
+            cursor.execute("ALTER TABLE Meetings ADD COLUMN absent_view TEXT")
+        if "status" not in meet_cols:
+            cursor.execute("ALTER TABLE Meetings ADD COLUMN status TEXT DEFAULT 'scheduled'")
 
     # 4. Tasks (id, meeting_id, assignee_id, task, deadline)
     cursor.execute("PRAGMA table_info(Tasks)")
@@ -2488,7 +2504,7 @@ def get_meetings_endpoint(current_user: dict = Depends(get_current_user)):
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT id, purpose, scheduled_time, config_flags FROM Meetings ORDER BY id DESC")
+    cursor.execute("SELECT id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status FROM Meetings ORDER BY id DESC")
     all_meetings = cursor.fetchall()
 
     if current_user["role"] == "admin":
@@ -2509,6 +2525,7 @@ def get_meetings_endpoint(current_user: dict = Depends(get_current_user)):
     conn.close()
 
     user_id = current_user["id"]
+    canonical_lower = current_user["canonical_name"].lower()
     filtered_meetings = []
     for m in all_meetings:
         m_dict = dict(m)
@@ -2520,10 +2537,109 @@ def get_meetings_endpoint(current_user: dict = Depends(get_current_user)):
         m_dict["config"] = cfg
 
         participants = cfg.get("expected_participants", [])
-        if user_id in participants or m_dict["id"] in task_meeting_ids:
+        is_participant = False
+        for p in participants:
+            if p == user_id:
+                is_participant = True
+                break
+            if isinstance(p, dict):
+                if p.get("id") == user_id or str(p.get("canonical_name", "")).lower() == canonical_lower:
+                    is_participant = True
+                    break
+            elif isinstance(p, str) and p.lower() == canonical_lower:
+                is_participant = True
+                break
+
+        if is_participant or m_dict["id"] in task_meeting_ids:
             filtered_meetings.append(m_dict)
 
     return filtered_meetings
+
+
+@app.get("/meetings/{meeting_id}")
+@app.get("/api/meetings/{meeting_id}")
+def get_single_meeting_endpoint(
+    meeting_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Returns full details, summaries (pm_view, group_view, absent_view), and tasks
+    for a specific meeting, protected by strict privacy filtering.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status FROM Meetings WHERE id = ?",
+        (meeting_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    m_dict = dict(row)
+    cfg = {}
+    try:
+        cfg = json.loads(m_dict["config_flags"]) if m_dict["config_flags"] else {}
+    except Exception:
+        pass
+    m_dict["config"] = cfg
+
+    # Privacy filtering check
+    user_id = current_user["id"]
+    canonical_lower = current_user["canonical_name"].lower()
+    if current_user["role"] != "admin":
+        cursor.execute("SELECT 1 FROM Tasks WHERE meeting_id = ? AND assignee_id = ?", (meeting_id, user_id))
+        has_task = cursor.fetchone() is not None
+
+        participants = cfg.get("expected_participants", [])
+        is_participant = False
+        for p in participants:
+            if p == user_id:
+                is_participant = True
+                break
+            if isinstance(p, dict):
+                if p.get("id") == user_id or str(p.get("canonical_name", "")).lower() == canonical_lower:
+                    is_participant = True
+                    break
+            elif isinstance(p, str) and p.lower() == canonical_lower:
+                is_participant = True
+                break
+
+        if not (has_task or is_participant):
+            conn.close()
+            raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this meeting")
+
+    # Fetch associated tasks
+    if current_user["role"] == "admin":
+        cursor.execute(
+            """
+            SELECT t.id, t.meeting_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+                   u.canonical_name as assignee
+            FROM Tasks t
+            LEFT JOIN Users u ON u.id = t.assignee_id
+            WHERE t.meeting_id = ?
+            ORDER BY t.id ASC
+            """,
+            (meeting_id,),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT t.id, t.meeting_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+                   u.canonical_name as assignee
+            FROM Tasks t
+            LEFT JOIN Users u ON u.id = t.assignee_id
+            WHERE t.meeting_id = ? AND t.assignee_id = ?
+            ORDER BY t.id ASC
+            """,
+            (meeting_id, user_id),
+        )
+    tasks = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    m_dict["tasks"] = tasks
+    return m_dict
 
 
 @app.post("/meetings", status_code=status.HTTP_201_CREATED)

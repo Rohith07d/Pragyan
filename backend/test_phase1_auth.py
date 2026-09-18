@@ -43,13 +43,17 @@ def test_relational_database_schema():
     assert "id" in proj_cols
     assert "name" in proj_cols
 
-    # 3. Meetings (id, purpose, scheduled_time, config_flags)
+    # 3. Meetings (id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status)
     cursor.execute("PRAGMA table_info(Meetings)")
     meet_cols = {row[1]: row[2] for row in cursor.fetchall()}
     assert "id" in meet_cols
     assert "purpose" in meet_cols
     assert "scheduled_time" in meet_cols
     assert "config_flags" in meet_cols
+    assert "pm_view" in meet_cols
+    assert "group_view" in meet_cols
+    assert "absent_view" in meet_cols
+    assert "status" in meet_cols
 
     # 4. Tasks (id, meeting_id, assignee_id, task, deadline)
     cursor.execute("PRAGMA table_info(Tasks)")
@@ -225,3 +229,48 @@ def test_strict_privacy_filtering_meetings(client):
     assert rohith_resp.status_code == 200
     rohith_meetings = rohith_resp.json()
     assert len(rohith_meetings) >= 1
+
+
+def test_single_meeting_privacy_and_access(client):
+    """
+    GET /meetings/{meeting_id}:
+    - Admin can view any meeting and all its tasks.
+    - Participant can view meeting and their assigned tasks.
+    - Non-participant gets 403 Forbidden.
+    """
+    admin_token = client.post("/login", json={"canonical_name": "Admin", "password": "admin123"}).json()["access_token"]
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+    # Create a private meeting only for Sambhav
+    sambhav_token = client.post("/login", json={"canonical_name": "Sambhav", "password": "sambhav123"}).json()["access_token"]
+    sambhav_headers = {"Authorization": f"Bearer {sambhav_token}"}
+
+    create_resp = client.post(
+        "/meetings",
+        json={
+            "purpose": "Sambhav Private Architecture Review",
+            "scheduled_time": "2026-10-01T10:00:00",
+            "config_flags": {"expected_participants": ["Sambhav"]},
+        },
+        headers=sambhav_headers,
+    )
+    assert create_resp.status_code == 201
+    private_mid = create_resp.json()["meeting"]["id"]
+
+    # Sambhav (participant) can access
+    s_resp = client.get(f"/meetings/{private_mid}", headers=sambhav_headers)
+    assert s_resp.status_code == 200
+    assert s_resp.json()["id"] == private_mid
+    assert "pm_view" in s_resp.json()
+    assert "status" in s_resp.json()
+
+    # Rohith (non-participant) gets 403 Forbidden
+    rohith_token = client.post("/login", json={"canonical_name": "Rohith", "password": "rohith123"}).json()["access_token"]
+    rohith_headers = {"Authorization": f"Bearer {rohith_token}"}
+    r_resp = client.get(f"/meetings/{private_mid}", headers=rohith_headers)
+    assert r_resp.status_code == 403
+
+    # Admin can access any meeting
+    a_resp = client.get(f"/meetings/{private_mid}", headers=admin_headers)
+    assert a_resp.status_code == 200
+    assert a_resp.json()["id"] == private_mid
