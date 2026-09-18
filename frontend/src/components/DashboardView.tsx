@@ -77,6 +77,7 @@ export default function DashboardView() {
     setUser(currentUser);
     loadData(currentUser);
 
+    let isMounted = true;
     // Initial unread count load
     const savedUnread = localStorage.getItem("aegis_unread_messages_count");
     if (savedUnread !== null) {
@@ -86,7 +87,11 @@ export default function DashboardView() {
     const handleMessagesUpdated = (e: any) => {
       const val = e?.detail?.unread ?? localStorage.getItem("aegis_unread_messages_count");
       if (val !== null && val !== undefined) {
-        setUnreadMessagesCount(parseInt(String(val), 10) || 0);
+        setTimeout(() => {
+          if (isMounted) {
+            setUnreadMessagesCount(parseInt(String(val), 10) || 0);
+          }
+        }, 0);
       }
     };
 
@@ -103,6 +108,7 @@ export default function DashboardView() {
     }, 5000);
 
     return () => {
+      isMounted = false;
       clearInterval(interval);
       window.removeEventListener("aegis_messages_updated", handleMessagesUpdated);
       window.removeEventListener("storage", handleMessagesUpdated);

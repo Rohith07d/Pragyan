@@ -21,6 +21,7 @@ export default function Sidebar() {
   const [messagesUnread, setMessagesUnread] = useState<number>(34);
 
   useEffect(() => {
+    let isMounted = true;
     const saved = localStorage.getItem("aegis_unread_messages_count");
     if (saved !== null) {
       setMessagesUnread(parseInt(saved, 10) || 0);
@@ -29,13 +30,18 @@ export default function Sidebar() {
     const handleUpdate = (e: any) => {
       const val = e?.detail?.unread ?? localStorage.getItem("aegis_unread_messages_count");
       if (val !== null && val !== undefined) {
-        setMessagesUnread(parseInt(String(val), 10) || 0);
+        setTimeout(() => {
+          if (isMounted) {
+            setMessagesUnread(parseInt(String(val), 10) || 0);
+          }
+        }, 0);
       }
     };
 
     window.addEventListener("aegis_messages_updated", handleUpdate);
     window.addEventListener("storage", handleUpdate);
     return () => {
+      isMounted = false;
       window.removeEventListener("aegis_messages_updated", handleUpdate);
       window.removeEventListener("storage", handleUpdate);
     };

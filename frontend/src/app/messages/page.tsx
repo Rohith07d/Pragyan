@@ -194,30 +194,15 @@ export default function MessagesPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const markChannelAsRead = (channelId: string) => {
-    setChannels((prev) => {
-      const updated = prev.map((c) => (c.id === channelId ? { ...c, unread: 0 } : c));
-      const newTotal = updated.reduce((sum, c) => sum + c.unread, 0);
-      try {
-        localStorage.setItem("aegis_unread_messages_count", String(newTotal));
-        const unreadMap = updated.reduce((acc, c) => ({ ...acc, [c.id]: c.unread }), {});
-        localStorage.setItem("aegis_channel_unread_map", JSON.stringify(unreadMap));
-        window.dispatchEvent(new CustomEvent("aegis_messages_updated", { detail: { unread: newTotal } }));
-      } catch {}
-      return updated;
-    });
+    setChannels((prev) =>
+      prev.map((c) => (c.id === channelId && c.unread > 0 ? { ...c, unread: 0 } : c))
+    );
   };
 
   const handleMarkAllRead = () => {
-    setChannels((prev) => {
-      const updated = prev.map((c) => ({ ...c, unread: 0 }));
-      try {
-        localStorage.setItem("aegis_unread_messages_count", "0");
-        const unreadMap = updated.reduce((acc, c) => ({ ...acc, [c.id]: 0 }), {});
-        localStorage.setItem("aegis_channel_unread_map", JSON.stringify(unreadMap));
-        window.dispatchEvent(new CustomEvent("aegis_messages_updated", { detail: { unread: 0 } }));
-      } catch {}
-      return updated;
-    });
+    setChannels((prev) =>
+      prev.map((c) => (c.unread > 0 ? { ...c, unread: 0 } : c))
+    );
   };
 
   const handleSelectChannel = (channelId: string) => {
@@ -234,23 +219,39 @@ export default function MessagesPage() {
       const savedMap = localStorage.getItem("aegis_channel_unread_map");
       if (savedMap) {
         const parsed = JSON.parse(savedMap);
-        setChannels((prev) => {
-          const updated = prev.map((c) => ({
+        setChannels((prev) =>
+          prev.map((c) => ({
             ...c,
             unread: c.id === activeChannelId ? 0 : (parsed[c.id] ?? c.unread),
-          }));
-          const total = updated.reduce((s, c) => s + c.unread, 0);
-          localStorage.setItem("aegis_unread_messages_count", String(total));
-          window.dispatchEvent(new CustomEvent("aegis_messages_updated", { detail: { unread: total } }));
-          return updated;
-        });
+          }))
+        );
         return;
       }
     } catch {}
 
-    // First load: Mark initially opened channel (meeting-briefs) as read!
+    // First load: Mark initially opened channel as read
     markChannelAsRead(activeChannelId);
   }, []);
+
+  // Synchronize unread counts to localStorage and broadcast event safely outside render phase
+  useEffect(() => {
+    let isMounted = true;
+    const total = channels.reduce((sum, c) => sum + c.unread, 0);
+    const unreadMap = channels.reduce((acc, c) => ({ ...acc, [c.id]: c.unread }), {});
+    try {
+      localStorage.setItem("aegis_unread_messages_count", String(total));
+      localStorage.setItem("aegis_channel_unread_map", JSON.stringify(unreadMap));
+    } catch {}
+    const timer = setTimeout(() => {
+      if (isMounted) {
+        window.dispatchEvent(new CustomEvent("aegis_messages_updated", { detail: { unread: total } }));
+      }
+    }, 0);
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
+  }, [channels]);
 
   // Poll backend for fresh channel messages every 3 seconds so other deployed users' messages appear live
   useEffect(() => {
