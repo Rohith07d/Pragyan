@@ -16,6 +16,7 @@ import {
   joinMeeting,
   leaveMeeting,
   scheduleMeeting,
+  updateTaskStatus,
   AuthUser,
   TaskItem,
   ProjectItem,
@@ -165,6 +166,19 @@ export default function DashboardView() {
       alert(err.response?.data?.detail || "Failed to schedule meeting");
     } finally {
       setIsBotStarting(false);
+    }
+  };
+
+  const handleToggleRecentTask = async (taskId: number, currentStatus: string) => {
+    if (taskId <= 0) return;
+    const nextStatus = currentStatus === "completed" ? "pending" : "completed";
+    try {
+      await updateTaskStatus(taskId, nextStatus);
+      setTasks((prev) =>
+        prev.map((t) => (t.id === taskId ? { ...t, status: nextStatus } : t))
+      );
+    } catch {
+      alert("Failed to update status");
     }
   };
 
@@ -365,7 +379,10 @@ export default function DashboardView() {
           {/* 4 Metric Cards in Dark Grayscale matching reference image */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {/* Card 1: Tasks Completed */}
-            <div className="bg-[#18181b] border border-zinc-800 rounded-2xl p-5 shadow-xs transition-transform hover:-translate-y-0.5 duration-200">
+            <div
+              onClick={() => router.push("/tasks")}
+              className="bg-[#18181b] border border-zinc-800 rounded-2xl p-5 shadow-xs transition-all hover:-translate-y-0.5 hover:border-zinc-700 cursor-pointer duration-200"
+            >
               <h3 className="text-xs text-gray-400 font-medium">Tasks Completed</h3>
               <div className="text-3xl font-bold text-white tracking-tight mt-2">
                 {tasksCompletedDisplay}
@@ -374,7 +391,10 @@ export default function DashboardView() {
             </div>
 
             {/* Card 2: Active Projects */}
-            <div className="bg-[#18181b] border border-zinc-800 rounded-2xl p-5 shadow-xs transition-transform hover:-translate-y-0.5 duration-200">
+            <div
+              onClick={() => router.push("/projects")}
+              className="bg-[#18181b] border border-zinc-800 rounded-2xl p-5 shadow-xs transition-all hover:-translate-y-0.5 hover:border-zinc-700 cursor-pointer duration-200"
+            >
               <h3 className="text-xs text-gray-400 font-medium">Active Projects</h3>
               <div className="text-3xl font-bold text-white tracking-tight mt-2">
                 {activeProjectsDisplay}
@@ -383,7 +403,10 @@ export default function DashboardView() {
             </div>
 
             {/* Card 3: Messages */}
-            <div className="bg-[#18181b] border border-zinc-800 rounded-2xl p-5 shadow-xs transition-transform hover:-translate-y-0.5 duration-200">
+            <div
+              onClick={() => router.push("/messages")}
+              className="bg-[#18181b] border border-zinc-800 rounded-2xl p-5 shadow-xs transition-all hover:-translate-y-0.5 hover:border-zinc-700 cursor-pointer duration-200"
+            >
               <h3 className="text-xs text-gray-400 font-medium">Messages</h3>
               <div className="text-3xl font-bold text-white tracking-tight mt-2">34</div>
               <p className="text-[11px] text-gray-400 mt-1">5 unread</p>
@@ -436,11 +459,38 @@ export default function DashboardView() {
                   {recentTasks.map((t, idx) => (
                     <tr key={idx} className="group hover:bg-zinc-800/30 transition-colors">
                       <td className="py-3 text-xs font-medium text-gray-200 group-hover:text-white">
-                        {t.task}
+                        <div className="flex items-center gap-2.5">
+                          {t.id > 0 && (
+                            <input
+                              type="checkbox"
+                              checked={t.status === "completed"}
+                              onChange={() => handleToggleRecentTask(t.id, t.status)}
+                              className="w-3.5 h-3.5 rounded border-zinc-700 bg-zinc-900 text-white focus:ring-0 cursor-pointer"
+                            />
+                          )}
+                          <span
+                            className={
+                              t.status === "completed" ? "line-through text-zinc-500" : ""
+                            }
+                          >
+                            {t.task}
+                          </span>
+                        </div>
                       </td>
                       <td className="py-3 text-xs text-gray-400">{t.project_name}</td>
                       <td className="py-3 text-xs text-gray-400">{t.deadline}</td>
-                      <td className="py-3 text-xs">{renderStatusBadge(t.status)}</td>
+                      <td className="py-3 text-xs">
+                        {t.id > 0 ? (
+                          <button
+                            onClick={() => handleToggleRecentTask(t.id, t.status)}
+                            className="cursor-pointer"
+                          >
+                            {renderStatusBadge(t.status)}
+                          </button>
+                        ) : (
+                          renderStatusBadge(t.status)
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

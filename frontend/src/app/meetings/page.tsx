@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
 import {
@@ -410,7 +411,12 @@ export default function MeetingsPage() {
                     {meetings.map((m) => (
                       <tr key={m.id} className="group hover:bg-zinc-800/30 transition-colors">
                         <td className="py-3 text-xs font-medium text-gray-200 group-hover:text-white">
-                          {m.purpose}
+                          <Link
+                            href={`/meetings/${m.id}`}
+                            className="text-white hover:text-emerald-400 hover:underline transition-colors font-medium flex items-center gap-1.5"
+                          >
+                            <span>{m.purpose}</span>
+                          </Link>
                         </td>
                         <td className="py-3 text-xs text-gray-400">{m.scheduled_time}</td>
                         <td className="py-3 text-xs">

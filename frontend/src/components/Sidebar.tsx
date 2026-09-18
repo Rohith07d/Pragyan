@@ -20,8 +20,8 @@ const navItems = [
   { name: "My Tasks", href: "/tasks", icon: CheckSquare },
   { name: "Projects", href: "/projects", icon: Folder },
   { name: "Meetings", href: "/meetings", icon: Video },
-  { name: "Messages", href: "/messages", icon: Mail },
-  { name: "Notifications", href: "/notifications", icon: Bell },
+  { name: "Messages", href: "/messages", icon: Mail, badge: "34" },
+  { name: "Notifications", href: "/notifications", icon: Bell, badge: "2" },
   { name: "Settings", href: "/settings", icon: Settings },
 ];
 
@@ -63,14 +63,27 @@ export default function Sidebar() {
               <Link
                 key={item.name}
                 href={item.href}
-                className={`flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                className={`flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${
                   isActive
                     ? "bg-gray-100 text-gray-950 font-semibold shadow-xs"
                     : "text-gray-600 hover:text-gray-900 hover:bg-gray-50"
                 }`}
               >
-                <Icon className={`w-4 h-4 ${isActive ? "text-gray-900" : "text-gray-500"}`} />
-                <span>{item.name}</span>
+                <div className="flex items-center gap-3">
+                  <Icon className={`w-4 h-4 ${isActive ? "text-gray-900" : "text-gray-500"}`} />
+                  <span>{item.name}</span>
+                </div>
+                {item.badge && (
+                  <span
+                    className={`text-[10px] font-bold px-1.5 py-0.2 rounded-full ${
+                      isActive
+                        ? "bg-gray-950 text-white"
+                        : "bg-gray-100 text-gray-700 border border-gray-200"
+                    }`}
+                  >
+                    {item.badge}
+                  </span>
+                )}
               </Link>
             );
           })}

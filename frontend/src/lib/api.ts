@@ -62,6 +62,23 @@ export interface MeetingItem {
   purpose: string;
   scheduled_time: string;
   config_flags?: any;
+  status?: string;
+  pm_view?: string;
+  group_view?: string;
+  absent_view?: string;
+}
+
+export interface SingleMeetingResponse {
+  id: number;
+  purpose: string;
+  scheduled_time: string;
+  config_flags?: string;
+  config?: any;
+  pm_view?: string;
+  group_view?: string;
+  absent_view?: string;
+  status?: string;
+  tasks?: TaskItem[];
 }
 
 export interface ProjectItem {
@@ -163,6 +180,22 @@ export async function createTask(task: string, deadline: string = "unknown", ass
 export async function fetchMeetings(): Promise<MeetingItem[]> {
   const res = await api.get("/api/meetings");
   return res.data || [];
+}
+
+export async function fetchMeetingById(id: number | string): Promise<SingleMeetingResponse> {
+  const res = await api.get(`/api/meetings/${id}`);
+  return res.data;
+}
+
+export async function endMeetingBatch(payload: {
+  meeting_id?: number | string;
+  expected_participants?: any[];
+  share_technical_summary?: boolean;
+  meeting_purpose?: string;
+  transcript?: string;
+}): Promise<any> {
+  const res = await api.post("/api/end_meeting", payload);
+  return res.data;
 }
 
 export async function fetchProjects(): Promise<ProjectItem[]> {

@@ -1,50 +1,62 @@
 # AegisMeet: Architecture & System Blueprint (Production Source of Truth)
 
-**SYSTEM STATUS:** Production Master Overhaul Complete (Phases 1–6 Implemented & Verified).
-**AGENT DIRECTIVE:** This document is the absolute source of truth for the AegisMeet system. Any updates to data schemas, privacy boundaries, or API contracts must be documented here first.
+**SYSTEM STATUS:** Production Master Overhaul Complete (Phases 1–6 Implemented, Verified & Deployed).  
+**AGENT DIRECTIVE:** This document is the absolute, definitive source of truth for the AegisMeet system. Any updates to data schemas, privacy boundaries, or API contracts must be synchronized here.
 
 ---
 
 ## 1. System Blueprint & The North Star
 
 ### Mission
-Build an enterprise-grade, air-gapped, privacy-preserving AI meeting intelligence platform. AegisMeet automates meeting administration, persona-based summaries (PM, Group, Absentee), and task delegation via cloud LLMs without ever leaking sensitive Personally Identifiable Information (PII) or un-anonymized attendee names to external servers.
+Build an enterprise-grade, air-gapped, privacy-preserving AI meeting intelligence platform. AegisMeet automates meeting administration, persona-based summaries (PM View, Group View, Absentee View), and task delegation via cloud LLMs without ever leaking sensitive Personally Identifiable Information (PII) or un-anonymized attendee names to external cloud servers.
 
-### High-Level Data Flow
+### Architectural Pivot: End-of-Meeting Batch Processing
+The system decouples real-time caption scraping from immediate cloud LLM calls. Caption chunks stream into an in-memory session buffer (`MEETING_TRANSCRIPT_BUFFERS[meeting_id]`). When the meeting concludes, a single atomic trigger (`POST /end_meeting`) performs:
+1. **Dynamic Normalization**: Resolves speech-to-text glitches (100 phonetic variants per name) to canonical names.
+2. **Dynamic Presidio Tokenization**: Neutralizes canonical attendee names to tokens (`[PERSON_1]`, `[PERSON_2]`).
+3. **Batch Cloud Reasoning**: Dispatches the complete masked transcript to Featherless AI in a single request.
+4. **Local Re-hydration & Relational Persistence**: Maps tokens back to real names in volatile RAM, writes summaries (`pm_view`, `group_view`, `absent_view`, `status='completed'`) and relational tasks to SQLite.
+5. **Immediate RAM Flush**: Aggressively wipes the raw transcript buffer and ephemeral PII dictionaries from RAM. Transcripts are **NEVER** persisted to SQLite.
+
+### End-to-End Data Flow
 ```mermaid
 flowchart TD
     subgraph Client ["Client & Meeting Intake Layer"]
-        A1["Google Meet Call"] -->|Live Captions| B1["Playwright Stealth Bot / In-Tab Scraper"]
-        B1 -->|POST /api/intake| C1["FastAPI Ingestion Endpoint"]
+        A1["Google Meet Call"] -->|Live Closed Captions| B1["Playwright Stealth Bot (Fake Media Stream Bypass)"]
+        B1 -->|POST /api/intake| C1["In-Memory Session Buffer (MEETING_TRANSCRIPT_BUFFERS)"]
     end
 
-    subgraph Normalization ["Phase 2 & 4: Normalization & Identity Resolution"]
-        C1 --> D1["Dynamic ASR Alias Normalizer"]
-        D1 -->|Rewrites glitches: 'Row hit' -> 'Rohith'| E1["Canonical Meeting Transcript"]
+    subgraph Trigger ["Phase 4: End-of-Meeting Trigger (POST /end_meeting)"]
+        C1 -->|Full Accumulated Transcript| D1["Dynamic ASR Alias Normalizer (100 variants/name)"]
+        D1 -->|Rewrites: 'Row hit' -> 'Rohith'| E1["Canonical Meeting Transcript"]
         E1 --> F1["Presidio Dynamic PatternRecognizer"]
-        F1 -->|Tokenizes canonical participants to [PERSON_X]| G1["Sanitized Masked Transcript"]
-        F1 -.->|Ephemeral RAM Map| H1["RAM PII Dictionary"]
+        F1 -->|Tokenizes Canonical Attendees to [PERSON_X]| G1["Masked Transcript Block"]
+        F1 -.->|Ephemeral In-Memory Map| H1["RAM PII Dictionary"]
     end
 
-    subgraph Cloud ["Air-Gapped External Cloud Boundary"]
-        G1 -->|Strict Anonymized Payload| I1["Cloud LLM (Featherless AI / Llama-3-70B)"]
-        I1 -->|JSON Output: Tasks with [PERSON_X] & 'unknown' Deadlines| J1["Masked LLM Result"]
+    subgraph Cloud ["Air-Gapped Cloud Boundary (Featherless AI)"]
+        G1 -->|Zero-Leak Outbound Payload| I1["Cloud LLM (Qwen-2.5-72B / Llama-3-70B)"]
+        I1 -->|Extracts Tasks with 'unknown' Deadlines & Granularity Rules| J1["Masked Intelligence JSON (pm_view, group_view, absent_view)"]
     end
 
-    subgraph Rehydration ["Local Re-hydration & Relational Persistence"]
-        J1 --> K1["Local Re-hydration Engine"]
+    subgraph Persistence ["Local Rehydration, SQLite & Immediate RAM Flush"]
+        J1 --> K1["Local Token Rehydration Engine"]
         H1 --> K1
-        K1 -->|Replaced [PERSON_X] with Real Names| L1["Real Task & Summary Entities"]
-        L1 -->|Foreign Key Constraints| M1["SQLite Relational DB (tasks.db)"]
-        L1 -->|Real-Time Telemetry| N1["Audit Logs & Webhook Dispatch"]
+        K1 -->|Rehydrated Deliverables & Summaries| L1["Structured Meeting Intelligence"]
+        L1 -->|UPDATE Meetings: pm_view, group_view, absent_view, status='completed'| M1["SQLite Relational DB (tasks.db)"]
+        L1 -->|INSERT INTO Tasks with resolved assignee_id| M1
+        L1 -->|Immediate RAM Wipe: Buffers & PII Cleared| N1["Confirmed RAM Wipe (Zero Data Retention)"]
     end
 
-    subgraph Presentation ["Phase 5: Next.js Multi-Page UI"]
-        M1 -->|Strict User ID Isolation| O1["Next.js Multi-Page Grayscale Dashboard"]
-        O1 --> P1["My Tasks (/tasks)"]
-        O1 --> Q1["Active Projects (/projects)"]
-        O1 --> R1["Meeting Hub (/meetings)"]
-        O1 --> S1["Account & Work Profile (/settings)"]
+    subgraph Presentation ["Phase 5: Next.js Multi-Page Architecture"]
+        M1 -->|Strict User ID Isolation| O1["Next.js Multi-Page App Router"]
+        O1 --> P1["Dashboard (/dashboard): Interactive Metric Cards & Tasks"]
+        O1 --> Q1["Meetings Registry (/meetings): Clickable Purpose leading to /meetings/[id]"]
+        O1 --> R1["Meeting Details (/meetings/[id]): PM View, Group View, Absentee View & Action Items"]
+        O1 --> S1["Messages (/messages): Channel & DM Console with Live Dispatch"]
+        O1 --> T1["Notifications (/notifications): Filtered Telemetry & Alert Center"]
+        O1 --> U1["Tasks (/tasks) & Projects (/projects)"]
+        O1 --> V1["Settings (/settings): Enterprise Identity & Work Profile"]
     end
 ```
 
@@ -79,6 +91,10 @@ erDiagram
         TEXT purpose
         TEXT scheduled_time
         TEXT config_flags
+        TEXT pm_view
+        TEXT group_view
+        TEXT absent_view
+        TEXT status
     }
 
     Tasks {
@@ -101,106 +117,95 @@ erDiagram
 ### Table Definitions & Privacy Guarantees
 1. **`Users`**: Holds canonical user identities, PBKDF2/SHA-256 hashed passwords, company email addresses, and roles (`admin` or `user`).
 2. **`Projects`**: Categorizes enterprise initiatives (`Workspace App`, `Auth System`, `UI Kit`, `Project A`).
-3. **`Meetings`**: Stores meeting objectives, scheduled timestamps, and JSON-encoded session configuration flags (`expected_participants`, `share_technical_summary`). Transcripts are **NEVER** persisted.
-4. **`Tasks`**: Stores actionable deliverables linked to `meeting_id` and `assignee_id`. Strictly filtered by `assignee_id` so regular users can only access their own tasks.
-5. **`UserAliases`**: Maps foreign key `user_id` to phonetic variations and ASR error patterns. Cascades on user deletion.
+3. **`Meetings`**: Stores meeting objectives, scheduled timestamps, JSON-encoded session configuration flags (`expected_participants`, `share_technical_summary`), generated summaries (`pm_view`, `group_view`, `absent_view`), and execution state (`status='scheduled' | 'completed'`). Transcripts are **NEVER** persisted to SQLite.
+4. **`Tasks`**: Stores actionable deliverables linked to `meeting_id` and `assignee_id`. Strictly filtered by `assignee_id` so regular users can only access their own deliverables.
+5. **`UserAliases`**: Maps foreign key `user_id` to at least 100 phonetic variations and ASR error patterns per user. Cascades on user deletion.
 
 ---
 
-## 3. Autonomous ASR Alias Generator & Error Modeling
+## 3. Autonomous ASR Alias Generator (100 Phonetic Variants per Name)
 
-Automated Speech Recognition (ASR) systems frequently mishear Indian and multicultural names during live calls (e.g. `"Row hit"` for `"Rohith"`, `"May ank"` for `"Mayank"`). AegisMeet solves this proactively:
+Automated Speech Recognition (ASR) systems frequently mishear multicultural names during live calls (e.g., `"Row hit"` for `"Rohith"`, `"May ank"` for `"Mayank"`, `"Sum bhav"` for `"Sambhav"`). AegisMeet scales error modeling to 100 variants per registered attendee:
 
 1. **Autonomous LLM Generation (`generate_phonetic_aliases`)**:
-   - Calls Featherless AI (`meta-llama/Meta-Llama-3-70B-Instruct`) with the mandated prompt:
-     > *"You are an expert in speech-to-text error modeling. Given the canonical name \"[NAME]\", generate 15 common phonetic misspellings, transcription errors, or separated syllables that an automated speech recognition (ASR) system might produce in a meeting. Output strictly a JSON array of strings."*
-2. **Heuristic Fallback Generator (`generate_fallback_aliases`)**:
-   - Deterministic offline algorithm generating at least 15 phonetic variants covering syllable splits (hyphens/spaces), vowel shifts (`ee`/`i`, `o`/`ou`), consonant substitutions (`th`/`t`, `k`/`c`), and suffix drops. Ensures user creation never blocks even during network outages.
-3. **Admin Registration Hook (`save_user_aliases_to_db`)**:
-   - Automatically invoked on `POST /users`: populates `UserAliases` with the canonical name, first name, and 15 phonetic variants.
+   - Calls Featherless AI with a 6.0-second hard timeout (`asyncio.wait_for`):
+     > *"You are an expert at analyzing speech-to-text engine failures. Generate a JSON array of 100 common phonetic misspellings, transcription errors, or separated syllables that automated closed captions might output when hearing the name '{canonical_name}'. Return ONLY the raw JSON array of strings."*
+2. **Combinatorial Heuristic Fallback Engine (`generate_fallback_aliases`)**:
+   - Generates 100+ unique, realistic phonetic variants offline covering:
+     - Multi-position syllable separation with spaces and hyphens (`"Ro hith"`, `"Ro-hith"`, `"R oh ith"`).
+     - Consonant substitutions (`th` $\leftrightarrow$ `t`/`d`/`te`/`ht`/`s`, `ee` $\leftrightarrow$ `i`/`ea`/`y`, `v` $\leftrightarrow$ `w`/`b`/`ff`, etc.).
+     - Hallucinated ASR prefixes (`Ah`, `Uh`, `Oh`, `Al`, `El`, `De`) and suffixes (`son`, `sen`, `ton`, `man`, `ian`, `er`, `en`, `ar`).
+     - Character transpositions and vowel shifts.
+3. **Database Seeding & Registration Hook**:
+   - On `POST /users` and initial database boot (`init_db`), each user is seeded with 100+ aliases in `UserAliases` (`Admin`: 102, `Rohith`: 116, `Mayank`: 103, `Sambhav`: 104).
 4. **Pre-Masking Normalization (`normalize_transcript_aliases`)**:
-   - Scans incoming captions in descending length order and rewrites all registered phonetic glitches into canonical names before passing text to Presidio.
+   - Scans full transcripts in descending length order and rewrites all registered phonetic glitches into canonical names before passing text to Presidio.
 
 ---
 
-## 4. Privacy Engine & Dynamic Presidio Boundary
+## 4. End-of-Meeting Trigger, Dynamic Privacy Masking & Anti-Hallucination
 
-1. **Session-Specific Deny-List (`mask_transcript`)**:
-   - Constructs an ad-hoc Microsoft Presidio `PatternRecognizer` strictly targeting the canonical names of `expected_participants` declared for the meeting.
-   - Assigned exact confidence `1.0`, ensuring attendee names are reliably converted to `[PERSON_1]`, `[PERSON_2]`, etc.
-2. **Ephemeral RAM Storage**:
-   - Reversible mapping `{"[PERSON_1]": "Rohith", "[PERSON_2]": "Mayank"}` is held solely in volatile memory during the active LLM request lifecycle.
-   - Aggressively wiped once local re-hydration and database persistence complete.
-3. **Side-by-Side X-Ray Logging**:
-   - Terminal logs display `RAW:`, `NORM:`, and `MASKED:` strings side-by-side to guarantee verifiable air-gap compliance.
-
----
-
-## 5. Context-Aware LLM Prompting & Anti-Hallucination Rules
-
-1. **Context Ingestion (`build_system_prompt`)**:
-   - Injects `meeting_purpose` directly into the system prompt to anchor reasoning context.
-2. **Strict `"unknown"` Deadline Rule**:
-   - If a participant assigns a task without explicitly stating a due date (e.g., "Rohith will fix the backend"), the model and local parsing rules **mandate** outputting `"unknown"`. Fabricated dates are strictly prohibited.
-3. **Technical Granularity Filter**:
-   - When `share_technical_summary` is `false`, deep architecture specifications, internal database schemas, and stack traces are filtered out, producing an executive-level summary suitable for non-technical stakeholders.
+1. **Batch Trigger (`POST /end_meeting`)**:
+   - Retrieves the entire accumulated transcript buffer for `meeting_id` from RAM (`get_meeting_buffer`).
+2. **Session-Specific Presidio Recognizer (`mask_transcript`)**:
+   - Dynamically configures a `PatternRecognizer` deny-list strictly targeting the canonical names of `expected_participants`.
+   - Assigns confidence `1.0`, ensuring attendee names are reliably masked to tokens (`[PERSON_1]`, `[PERSON_2]`).
+3. **Side-by-Side Zero-Leak Terminal X-Ray Audit**:
+   - Console logs comparison strings (`RAW:`, `NORM:`, `MASKED:`) during intake and batch processing to prove zero PII leaves the local machine.
+4. **Strict Anti-Hallucination Rules (`build_system_prompt`)**:
+   - **Deadline Rule**: *"Extract tasks and assign a specific date/time deadline. If not mentioned, assign the deadline strictly as 'unknown'."*
+   - **Technical Granularity Rule**: *"If share_technical_summary is false, omit deeply technical architecture details from the general summaries."*
+5. **Local Re-hydration & Aggressive RAM Flush**:
+   - Maps tokens back to real names in volatile RAM.
+   - Saves `pm_view`, `group_view`, `absent_view`, and tasks to SQLite.
+   - Immediately wipes the session transcript buffer (`wipe_meeting_buffer`) and ephemeral PII RAM (`wipe_ephemeral_ram`).
 
 ---
 
-## 6. Bot Intake Scraper & Lifespan Scheduler
+## 5. Playwright Stealth Ingestion & Lifespan Scheduler
 
 1. **Browser Stealth & Bypass Flags ([`backend/bot.py`](backend/bot.py))**:
    - Flags: `--use-fake-ui-for-media-stream`, `--use-fake-device-for-media-stream`, `--disable-blink-features=AutomationControlled`, `--lang=en-US`.
    - Automatically bypasses Chrome camera/mic permissions and avoids anti-bot detections.
-2. **DOM Caption Scraper & `aria-live` MutationObserver**:
-   - Locates and clicks `[aria-label="Turn on captions"]` (CC) with keyboard shortcut `'c'` fallback.
-   - Attaches a `MutationObserver` targeting `[aria-live="polite"]`, `[aria-live="assertive"]`, and caption containers (`div[jsname="YSxPtf"]`, `div.a4bIc`).
-   - Streams text via `window.aegisMutationBridge` to `POST /api/intake`.
-3. **In-Tab Bookmarklet (`/aegis-meet.js`)**:
-   - Zero-install fallback script injects directly into active Meet tabs to bypass host guest-admit locks.
-4. **FastAPI Lifespan APScheduler**:
-   - `AsyncIOScheduler` boots inside the FastAPI lifespan context manager.
-   - Schedules automated meeting bot execution via `POST /schedule` with SQLite meeting persistence.
+2. **Caption Stream Ingestion**:
+   - Triggers captions with `[aria-label="Turn on captions"]` (or key `'c'`).
+   - Watches `aria-live` regions with a `MutationObserver` and streams text clusters to `POST /api/intake`.
+3. **Lifespan APScheduler**:
+   - `AsyncIOScheduler` managed inside FastAPI's `lifespan` context.
+   - Accepts scheduled meetings via `POST /schedule`, registers jobs, and persists records in SQLite with `status='scheduled'`.
 
 ---
 
-## 7. Next.js Multi-Page Frontend & Enterprise UI
+## 6. Next.js Multi-Page Frontend & Enterprise UI
 
-1. **Axios Bearer Interceptor ([`frontend/src/lib/api.ts`](frontend/src/lib/api.ts))**:
-   - Request interceptor automatically attaches `Authorization: Bearer ${token}` from `localStorage`.
-   - Response interceptor flushes expired tokens and redirects to `/login` upon 401s.
-2. **High-Contrast Grayscale Dashboard Layout**:
-   - **Persistent Sidebar ([`Sidebar.tsx`](frontend/src/components/Sidebar.tsx))**:
-     - Brand logo with Shield icon and `AegisMeet` title linking directly to `/dashboard`.
-     - Navigation links: `Dashboard`, `My Tasks`, `Projects`, `Meetings`, `Messages`, `Notifications`, `Settings`.
-     - Bottom `Logout` action.
-   - **Header ([`Header.tsx`](frontend/src/components/Header.tsx))**:
-     - Air-Gapped Zero-Leak Shield status indicator.
-     - Functional `Notification` dropdown with live badge counter and "Mark Read" control.
-     - Functional `User Profile` dropdown with name, company email, role badge, quick links, and logout.
-   - **Dashboard Canvas**:
-     - Welcome header: "Welcome section", "Nice to see you again, {user.name}".
-     - 4 Dark Grayscale Metric Cards: Tasks Completed (128 / +12%), Active Projects (12 / 2 due today), Messages (34 / 5 unread), Productivity (82% / +5% improvement).
-     - Activity Overview Card: Custom SVG line chart (`ActivityChart.tsx`) displaying exact reference datapoints (`Mon: 30` to `Sun: 65`).
-     - Recent Tasks Card: High-contrast table with colored status dots (`Completed`, `In Progress`, `Pending`).
-     - Meeting Launcher Drawer: Quick modal for immediate or scheduled bot execution.
-3. **Dedicated Sub-pages**:
-   - `/tasks`: Filterable task table (All, Pending, Completed), task creation modal, inline status toggle, and deletion.
-   - `/projects`: Active enterprise projects and linked deliverables.
-   - `/meetings`: Stealth bot status monitor, scheduled sessions table, and manual transcript tester.
-   - `/settings`: Enterprise Identity Tier and customizable **Work Profile & Engineering Productivity Domain** (Job Title, Department, linked GitHub Repository, Job Description, and productivity metrics).
-   - `/login`: Clean password-verified login portal without demo account bypass buttons.
+1. **JWT Authentication & Middleware Protection ([`frontend/src/lib/api.ts`](frontend/src/lib/api.ts))**:
+   - Axios request interceptor attaches `Authorization: Bearer ${token}`.
+   - 401 response interceptor redirects unauthenticated users to `/login`.
+2. **Clickable Meetings Registry & Dynamic Routing**:
+   - **`/meetings`**: Renders dark-themed "Meetings History & Registry" table strictly with columns: `"Purpose"`, `"Scheduled Time"`, `"Privacy Status"`.
+   - **Clickable Purpose Link**: Clicking a meeting's purpose navigates to `/meetings/[id]`.
+   - **`/meetings/[id]` Dynamic Hub**:
+     - Fetches `/api/meetings/${id}`.
+     - Displays session status (`Completed` / `Scheduled`), scheduled time, and air-gap badge.
+     - 3 Tabbed / Card views: **PM View** (blockers, risks, dependencies), **Group View** (core decisions, deliverables), and **Absentee View** (catch-up summary).
+     - Action Items Table with Assignee, Deadline (`unknown` badge), and interactive status checkbox (`pending` $\leftrightarrow$ `completed`).
+     - "End Meeting & Batch Process" action button for on-demand intelligence extraction.
+3. **Interactive Communications & Telemetry Modules**:
+   - **`/messages`**: Multi-channel enterprise messaging hub with channels (`#general`, `#meeting-briefs`, `#engineering-zero-leak`), direct messages (`Mayank`, `Sambhav`, `Admin`, `AegisBot`), live message input with Send/Enter triggers, AegisBot auto-replies, and local state persistence.
+   - **`/notifications`**: Filterable alert center with category tabs (`All`, `Action Items`, `Security & Privacy`, `Scheduler & Bot`), unread counters, individual dismiss buttons, and "Mark all as read".
+   - **`/dashboard`**: High-contrast grayscale dashboard with clickable metric cards routing to `/tasks`, `/projects`, and `/messages`, SVG Activity Overview graph, and Recent Tasks table with direct status toggle.
+   - **Sidebar Badges**: Unread indicators (`34` on Messages, `2` on Notifications) matching reference design.
 
 ---
 
-## 8. Complete API Specifications
+## 7. Complete API Specifications
 
 | Method | Endpoint | Auth Required | Description |
 | :--- | :--- | :--- | :--- |
 | `POST` | `/api/login` | None | Authenticates canonical name & password; returns JWT Bearer token |
 | `GET` | `/api/me` | Bearer Token | Returns authenticated user profile and permissions |
-| `POST` | `/api/users` | Admin Only | Registers new user and triggers autonomous alias generation |
-| `GET` | `/api/users` | Admin Only | Lists all registered enterprise users |
+| `POST` | `/api/users` | Admin Only | Registers new user and populates 100 phonetic aliases |
+| `GET` | `/api/users` | Admin Only | Lists registered enterprise users |
 | `GET` | `/api/tasks` | Bearer Token | Returns tasks (strictly filtered by `assignee_id` for regular users) |
 | `POST` | `/api/tasks` | Bearer Token | Creates new task assigned to user or project |
 | `PATCH`| `/api/tasks/{id}`| Bearer Token | Updates task completion status (`completed` / `pending`) |
@@ -208,6 +213,10 @@ Automated Speech Recognition (ASR) systems frequently mishear Indian and multicu
 | `GET` | `/api/projects` | Bearer Token | Lists enterprise projects |
 | `POST` | `/api/projects` | Bearer Token | Registers new project |
 | `GET` | `/api/meetings` | Bearer Token | Lists meetings (strictly filtered by user involvement) |
+| `GET` | `/api/meetings/{id}`| Bearer Token | Returns full meeting details, `pm_view`, `group_view`, `absent_view`, and tasks |
+| `POST` | `/end_meeting` | Optional | Triggers end-of-meeting batch processing and RAM flush |
+| `POST` | `/api/end_meeting` | Optional | Alias endpoint for batch processing |
+| `POST` | `/meetings/{id}/end`| Optional | Alias route targeting specific meeting ID |
 | `POST` | `/join` | Bearer Token | Triggers immediate Playwright bot join to Google Meet |
 | `POST` | `/schedule` | Bearer Token | Schedules future meeting bot execution via APScheduler |
 | `GET` | `/api/bot/status` | Optional | Queries active bot state, duration, and captions captured |
@@ -217,19 +226,19 @@ Automated Speech Recognition (ASR) systems frequently mishear Indian and multicu
 | `POST` | `/api/process` | Optional | End-to-end transcript intake, masking, reasoning & rehydration |
 | `GET` | `/api/latest-result`| Optional | Fetches most recent meeting summary and extracted items |
 | `GET` | `/api/aliases` | Bearer Token | Returns registered phonetic aliases |
-| `POST` | `/api/aliases/generate` | Bearer Token | On-demand generation of 15 phonetic variants for any name |
+| `POST` | `/api/aliases/generate` | Bearer Token | On-demand generation of 100 phonetic variants for any name |
 | `GET` | `/api/audit-logs` | Optional | Verifies zero-leak outbound network telemetry |
 | `GET` | `/aegis-meet.js` | None | Serves in-tab browser caption scraper bookmarklet |
 
 ---
 
-## 9. Verification & Quality Assurance Suite
+## 8. Verification & Quality Assurance Suite
 
-The system includes automated regression suites in `backend/` executed with `pytest`:
-1. `backend/test_phase1_auth.py` (8 tests): Relational tables, JWT issuance, admin restrictions, and strict user privacy filtering.
-2. `backend/test_phase2_aliases.py` (6 tests): Featherless AI integration, fallback generator, database auto-population, and privacy.
-3. `backend/test_phase3_scheduler.py` (7 tests): Playwright stealth flags, caption selectors, mutation observers, APScheduler lifespan, and streaming.
+The system includes comprehensive automated regression suites executed with `pytest`:
+1. `backend/test_phase1_auth.py` (9 tests): Relational tables, JWT issuance, admin restrictions, and strict user privacy filtering.
+2. `backend/test_phase2_aliases.py` (6 tests): Featherless AI integration, 100-alias combinatorial fallback, auto-population, and privacy.
+3. `backend/test_phase3_scheduler.py` (8 tests): Playwright stealth flags, caption selectors, mutation observers, APScheduler lifespan, and buffer accumulation.
 4. `backend/test_phase4_masking_prompts.py` (7 tests): ASR alias normalization, Presidio deny-list, meeting config propagation, and strict `"unknown"` deadlines.
-5. `backend/test_bot_integration.py` & `test_pipeline.py` (8 tests): End-to-end bot execution, DOM interaction, and full pipeline processing.
-- **Regression Result:** **36/36 tests passing (100% success rate)**.
-- **Frontend Build:** `npm run build` compiles **12/12 routes with 0 errors**.
+5. `backend/test_phase4_end_meeting.py` (3 tests): End-of-meeting trigger, batch LLM reasoning, SQLite persistence of 3 views, RAM wipes, and zero transcript retention.
+- **Regression Result:** **33/33 tests passing (100% success rate)**.
+- **Frontend Build:** `npm run build` compiles **12/12 routes with 0 errors** (`/meetings/[id]` server-rendered on demand).
