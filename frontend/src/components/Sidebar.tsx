@@ -11,6 +11,7 @@ import {
   Settings,
   LogOut,
   Video,
+  Shield,
 } from "lucide-react";
 import { logoutUser } from "@/lib/api";
 
@@ -30,9 +31,24 @@ export default function Sidebar() {
   return (
     <aside className="w-56 bg-white border-r border-gray-200 flex flex-col justify-between h-screen sticky top-0 px-4 py-6 z-20 select-none">
       <div>
-        {/* Top Header matching reference image */}
-        <div className="px-3 mb-8">
-          <h1 className="text-xl font-bold text-gray-900 tracking-tight">Dashboard</h1>
+        {/* AegisMeet Brand Logo & Name linking to /dashboard */}
+        <div className="px-2 mb-8">
+          <Link
+            href="/dashboard"
+            className="flex items-center gap-2.5 group cursor-pointer"
+          >
+            <div className="w-8 h-8 rounded-xl bg-black text-white flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
+              <Shield className="w-4 h-4 stroke-[2.2]" />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-lg font-bold text-gray-900 tracking-tight leading-tight group-hover:text-gray-700 transition-colors">
+                AegisMeet
+              </span>
+              <span className="text-[10px] text-gray-400 font-medium tracking-wide">
+                Enterprise Privacy
+              </span>
+            </div>
+          </Link>
         </div>
 
         {/* Navigation links */}
