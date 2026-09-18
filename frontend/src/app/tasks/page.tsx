@@ -7,24 +7,28 @@ import Header from "@/components/Header";
 import {
   getCurrentUser,
   fetchTasks,
+  fetchUsers,
   createTask,
   api,
   AuthUser,
   TaskItem,
 } from "@/lib/api";
-import { Plus, Trash2, CheckCircle2, Clock, X, AlertCircle } from "lucide-react";
+import { Plus, Trash2, CheckCircle2, Clock, X, AlertCircle, Shield, User } from "lucide-react";
 
 export default function TasksPage() {
   const router = useRouter();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [usersList, setUsersList] = useState<AuthUser[]>([]);
   const [filter, setFilter] = useState<"all" | "completed" | "pending">("all");
+  const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
   const [isLoading, setIsLoading] = useState(true);
 
   // New task modal
   const [showModal, setShowModal] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [newTaskDeadline, setNewTaskDeadline] = useState("");
+  const [newTaskAssigneeId, setNewTaskAssigneeId] = useState<number | undefined>(undefined);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
@@ -34,14 +38,20 @@ export default function TasksPage() {
       return;
     }
     setUser(currentUser);
-    loadTasks();
+    loadData(currentUser);
   }, [router]);
 
-  const loadTasks = async () => {
+  const loadData = async (activeUser?: AuthUser | null) => {
     setIsLoading(true);
     try {
-      const data = await fetchTasks();
-      setTasks(data || []);
+      const [tData, uData] = await Promise.all([
+        fetchTasks(),
+        (activeUser?.role || user?.role) === "admin" ? fetchUsers() : Promise.resolve([]),
+      ]);
+      setTasks(tData || []);
+      if (uData && uData.length > 0) {
+        setUsersList(uData);
+      }
     } catch {
       // quiet catch
     } finally {
@@ -54,11 +64,13 @@ export default function TasksPage() {
     if (!newTaskTitle.trim()) return;
     setIsSubmitting(true);
     try {
-      await createTask(newTaskTitle.trim(), newTaskDeadline.trim() || "unknown");
+      const assignee = user?.role === "admin" ? newTaskAssigneeId : user?.id;
+      await createTask(newTaskTitle.trim(), newTaskDeadline.trim() || "unknown", assignee);
       setNewTaskTitle("");
       setNewTaskDeadline("");
+      setNewTaskAssigneeId(undefined);
       setShowModal(false);
-      await loadTasks();
+      await loadData(user);
     } catch (err: any) {
       alert(err.response?.data?.detail || "Failed to create task");
     } finally {
@@ -89,8 +101,16 @@ export default function TasksPage() {
   };
 
   const filteredTasks = tasks.filter((t) => {
-    if (filter === "completed") return t.status === "completed";
-    if (filter === "pending") return t.status !== "completed";
+    // Status filter
+    if (filter === "completed" && t.status !== "completed") return false;
+    if (filter === "pending" && t.status === "completed") return false;
+
+    // Admin Assignee filter
+    if (user?.role === "admin" && assigneeFilter !== "all") {
+      if ((t.assignee || "").toLowerCase() !== assigneeFilter.toLowerCase()) {
+        return false;
+      }
+    }
     return true;
   });
 
@@ -106,10 +126,12 @@ export default function TasksPage() {
             <div>
               <p className="text-xs text-gray-500 font-medium">Task Management</p>
               <h1 className="text-2xl font-bold text-gray-900 tracking-tight mt-0.5">
-                My Assigned Tasks
+                {user?.role === "admin" ? "Enterprise Task Governance" : "My Assigned Tasks"}
               </h1>
               <p className="text-xs text-gray-500 mt-0.5">
-                Strict privacy boundary: only tasks allocated to {user?.canonical_name || "you"} are visible.
+                {user?.role === "admin"
+                  ? "Admin visibility: inspect and manage deliverables across all company participants."
+                  : `Strict privacy boundary: only tasks allocated to ${user?.canonical_name || "you"} are visible.`}
               </p>
             </div>
 
@@ -122,38 +144,58 @@ export default function TasksPage() {
             </button>
           </div>
 
-          {/* Filter Pills */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setFilter("all")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors ${
-                filter === "all"
-                  ? "bg-black text-white"
-                  : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"
-              }`}
-            >
-              All ({tasks.length})
-            </button>
-            <button
-              onClick={() => setFilter("pending")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors ${
-                filter === "pending"
-                  ? "bg-black text-white"
-                  : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"
-              }`}
-            >
-              Pending ({tasks.filter((t) => t.status !== "completed").length})
-            </button>
-            <button
-              onClick={() => setFilter("completed")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors ${
-                filter === "completed"
-                  ? "bg-black text-white"
-                  : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"
-              }`}
-            >
-              Completed ({tasks.filter((t) => t.status === "completed").length})
-            </button>
+          {/* Filter Pills & Admin Assignee Filter */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setFilter("all")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors ${
+                  filter === "all"
+                    ? "bg-black text-white"
+                    : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                All ({tasks.length})
+              </button>
+              <button
+                onClick={() => setFilter("pending")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors ${
+                  filter === "pending"
+                    ? "bg-black text-white"
+                    : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                Pending ({tasks.filter((t) => t.status !== "completed").length})
+              </button>
+              <button
+                onClick={() => setFilter("completed")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-colors ${
+                  filter === "completed"
+                    ? "bg-black text-white"
+                    : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                Completed ({tasks.filter((t) => t.status === "completed").length})
+              </button>
+            </div>
+
+            {user?.role === "admin" && usersList.length > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 font-medium">Assignee:</span>
+                <select
+                  value={assigneeFilter}
+                  onChange={(e) => setAssigneeFilter(e.target.value)}
+                  className="text-xs bg-white border border-gray-200 rounded-lg px-2.5 py-1.5 text-gray-800 focus:outline-none focus:border-black"
+                >
+                  <option value="all">All Team Members</option>
+                  {usersList.map((u) => (
+                    <option key={u.id} value={u.canonical_name || u.name}>
+                      {u.canonical_name || u.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
 
           {/* Tasks Table Dark Card */}
@@ -170,6 +212,7 @@ export default function TasksPage() {
                   <thead>
                     <tr className="border-b border-zinc-800/80 text-[11px] text-gray-400 font-medium pb-2">
                       <th className="pb-2.5 font-medium">Task</th>
+                      {user?.role === "admin" && <th className="pb-2.5 font-medium">Assignee</th>}
                       <th className="pb-2.5 font-medium">Deadline</th>
                       <th className="pb-2.5 font-medium">Status</th>
                       <th className="pb-2.5 font-medium text-right">Actions</th>
@@ -201,6 +244,13 @@ export default function TasksPage() {
                             </span>
                           </div>
                         </td>
+                        {user?.role === "admin" && (
+                          <td className="py-3 text-xs text-zinc-300">
+                            <span className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[11px]">
+                              {task.assignee || "Unassigned"}
+                            </span>
+                          </td>
+                        )}
                         <td className="py-3 text-xs text-gray-400">{task.deadline}</td>
                         <td className="py-3 text-xs">
                           {task.status === "completed" ? (
@@ -262,6 +312,26 @@ export default function TasksPage() {
                   className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-gray-200 focus:outline-none focus:border-black"
                 />
               </div>
+
+              {user?.role === "admin" && usersList.length > 0 && (
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1">
+                    Assignee
+                  </label>
+                  <select
+                    value={newTaskAssigneeId || ""}
+                    onChange={(e) => setNewTaskAssigneeId(e.target.value ? Number(e.target.value) : undefined)}
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-gray-200 focus:outline-none focus:border-black bg-white"
+                  >
+                    <option value="">Unassigned</option>
+                    {usersList.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.canonical_name || u.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1">

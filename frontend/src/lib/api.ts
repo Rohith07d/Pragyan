@@ -224,3 +224,45 @@ export async function leaveMeeting(): Promise<any> {
   const res = await api.post("/api/bot/leave");
   return res.data;
 }
+
+export interface UserAlert {
+  id: string;
+  task_id: number;
+  title: string;
+  message: string;
+  deadline: string;
+  severity: "high" | "medium";
+  type: string;
+  created_at?: string;
+}
+
+export interface UserDashboardData {
+  user_name: string;
+  stats: {
+    total_tasks: number;
+    pending_tasks: number;
+    completed_tasks: number;
+    alerts_count: number;
+  };
+  alerts: UserAlert[];
+  tasks: TaskItem[];
+  personalized_briefing: string;
+}
+
+export async function fetchUserDashboard(userName: string): Promise<UserDashboardData | null> {
+  try {
+    const res = await api.get(`/api/user/${encodeURIComponent(userName)}/dashboard`);
+    return res.data;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchUsers(): Promise<AuthUser[]> {
+  try {
+    const res = await api.get("/api/users");
+    return res.data || [];
+  } catch {
+    return [];
+  }
+}

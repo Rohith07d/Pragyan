@@ -11,6 +11,8 @@ import {
   fetchProjects,
   fetchMeetings,
   fetchBotStatus,
+  fetchUserDashboard,
+  fetchUsers,
   joinMeeting,
   leaveMeeting,
   scheduleMeeting,
@@ -19,8 +21,22 @@ import {
   ProjectItem,
   MeetingItem,
   BotStatus,
+  UserDashboardData,
+  UserAlert,
 } from "@/lib/api";
-import { Video, Calendar, Plus, RefreshCw, X, Shield, Clock } from "lucide-react";
+import {
+  Video,
+  Calendar,
+  Plus,
+  RefreshCw,
+  X,
+  Shield,
+  Clock,
+  AlertTriangle,
+  Sparkles,
+  ChevronRight,
+  UserCheck,
+} from "lucide-react";
 
 export default function DashboardView() {
   const router = useRouter();
@@ -29,6 +45,9 @@ export default function DashboardView() {
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [meetings, setMeetings] = useState<MeetingItem[]>([]);
   const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
+  const [dashboardData, setDashboardData] = useState<UserDashboardData | null>(null);
+  const [allUsers, setAllUsers] = useState<AuthUser[]>([]);
+  const [selectedUserFilter, setSelectedUserFilter] = useState<string>("all");
   const [isLoading, setIsLoading] = useState(true);
 
   // Meeting modal drawer state
@@ -46,7 +65,7 @@ export default function DashboardView() {
       return;
     }
     setUser(currentUser);
-    loadData();
+    loadData(currentUser);
 
     const interval = setInterval(async () => {
       try {
@@ -60,24 +79,39 @@ export default function DashboardView() {
     return () => clearInterval(interval);
   }, [router]);
 
-  const loadData = async () => {
+  const loadData = async (activeUser?: AuthUser | null, filterName: string = "all") => {
+    const u = activeUser || user;
+    if (!u) return;
     setIsLoading(true);
+
     try {
-      const [tData, pData, mData, bStatus] = await Promise.all([
+      const targetUser = filterName !== "all" ? filterName : (u.canonical_name || u.name);
+
+      const [tData, pData, mData, bStatus, uDash, uList] = await Promise.all([
         fetchTasks().catch(() => []),
         fetchProjects().catch(() => []),
         fetchMeetings().catch(() => []),
         fetchBotStatus().catch(() => null),
+        fetchUserDashboard(targetUser).catch(() => null),
+        u.role === "admin" ? fetchUsers().catch(() => []) : Promise.resolve([]),
       ]);
+
       setTasks(tData || []);
       setProjects(pData || []);
       setMeetings(mData || []);
       setBotStatus(bStatus);
+      setDashboardData(uDash);
+      if (uList && uList.length > 0) setAllUsers(uList);
     } catch {
       // ignore
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleUserFilterChange = async (targetName: string) => {
+    setSelectedUserFilter(targetName);
+    await loadData(user, targetName);
   };
 
   const handleJoinMeeting = async () => {
@@ -98,7 +132,7 @@ export default function DashboardView() {
       });
       setShowMeetModal(false);
       setMeetUrl("");
-      loadData();
+      loadData(user, selectedUserFilter);
     } catch (err: any) {
       alert(err.response?.data?.detail || "Failed to launch bot");
     } finally {
@@ -126,7 +160,7 @@ export default function DashboardView() {
       setShowMeetModal(false);
       setMeetUrl("");
       setScheduleTime("");
-      loadData();
+      loadData(user, selectedUserFilter);
     } catch (err: any) {
       alert(err.response?.data?.detail || "Failed to schedule meeting");
     } finally {
@@ -171,17 +205,23 @@ export default function DashboardView() {
     },
   ];
 
+  // Filter tasks if admin selected a specific user
+  const effectiveTasks =
+    selectedUserFilter !== "all" && user?.role === "admin"
+      ? tasks.filter((t) => (t.assignee || "").toLowerCase() === selectedUserFilter.toLowerCase())
+      : tasks;
+
   const recentTasks =
-    tasks.length > 0
+    effectiveTasks.length > 0
       ? [
-          ...tasks.slice(0, 4).map((t) => ({
+          ...effectiveTasks.slice(0, 4).map((t) => ({
             id: t.id,
             task: t.task,
             project_name: t.project_name || "Aegis Core",
             deadline: t.deadline || "12 Aug",
             status: t.status || "pending",
           })),
-          ...defaultReferenceTasks.slice(tasks.length),
+          ...defaultReferenceTasks.slice(effectiveTasks.length),
         ].slice(0, 4)
       : defaultReferenceTasks;
 
@@ -237,7 +277,7 @@ export default function DashboardView() {
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                   <span>Bot Active ({botStatus.duration_sec}s)</span>
                   <button
-                    onClick={() => leaveMeeting().then(loadData)}
+                    onClick={() => leaveMeeting().then(() => loadData(user, selectedUserFilter))}
                     className="ml-1 text-red-600 hover:text-red-800 font-semibold cursor-pointer"
                   >
                     Disconnect
@@ -253,6 +293,74 @@ export default function DashboardView() {
               </button>
             </div>
           </div>
+
+          {/* Admin Multi-User Governance Switcher (Visible to Admin only) */}
+          {user?.role === "admin" && allUsers.length > 0 && (
+            <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Shield className="w-4 h-4 text-gray-900" />
+                <span className="text-xs font-bold text-gray-900">Admin Governance Portal:</span>
+                <span className="text-xs text-gray-500">Filter workspace deliverables by participant</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  onClick={() => handleUserFilterChange("all")}
+                  className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                    selectedUserFilter === "all"
+                      ? "bg-black text-white font-semibold"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                  }`}
+                >
+                  Company-Wide View
+                </button>
+                {allUsers.map((u) => (
+                  <button
+                    key={u.id}
+                    onClick={() => handleUserFilterChange(u.canonical_name || u.name)}
+                    className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                      selectedUserFilter === (u.canonical_name || u.name)
+                        ? "bg-black text-white font-semibold"
+                        : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                    }`}
+                  >
+                    {u.canonical_name || u.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Targeted Action Alert Banner (Dynamic per authenticated user) */}
+          {dashboardData?.alerts && dashboardData.alerts.length > 0 && (
+            <div className="bg-[#18181b] border border-zinc-800 rounded-2xl p-4 shadow-xs flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                  <AlertTriangle className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-white">
+                      Personalized Action Item Due Soon:
+                    </span>
+                    <span className="text-[10px] uppercase font-bold bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded border border-amber-500/30">
+                      {dashboardData.alerts[0].deadline}
+                    </span>
+                  </div>
+                  <p className="text-xs text-zinc-300 mt-0.5">
+                    {dashboardData.alerts[0].message}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => router.push("/tasks")}
+                className="text-xs font-semibold text-white hover:text-zinc-300 flex items-center gap-1 cursor-pointer flex-shrink-0"
+              >
+                <span>View My Tasks</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
 
           {/* 4 Metric Cards in Dark Grayscale matching reference image */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -298,7 +406,14 @@ export default function DashboardView() {
           {/* Recent Tasks Card matching reference image */}
           <div className="bg-[#18181b] border border-zinc-800 rounded-2xl p-6 shadow-xs">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-white">Recent Tasks</h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-semibold text-white">Recent Tasks</h2>
+                {selectedUserFilter !== "all" && (
+                  <span className="text-[10px] bg-zinc-800 text-zinc-300 px-2 py-0.5 rounded-md border border-zinc-700">
+                    Filtered for: {selectedUserFilter}
+                  </span>
+                )}
+              </div>
               <button
                 onClick={() => router.push("/tasks")}
                 className="text-[11px] text-gray-400 hover:text-white transition-colors cursor-pointer"
