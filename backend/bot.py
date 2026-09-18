@@ -127,22 +127,34 @@ class AegisMeetBot:
         async with async_playwright() as p:
             # Grant fake media streams to avoid browser mic/cam permission blocks
             # Browser Bypass: Auto-accept media streams and prevent automation detection
+            # Browser Bypass: Auto-accept media streams, force en-US locale, and avoid automation flags
             browser_args = [
                 "--use-fake-ui-for-media-stream",     # Auto-accepts permission prompts
-                "--use-fake-device-for-media-stream", # Feeds a blank stream instead of your real webcam
-                "--disable-blink-features=AutomationControlled" # Prevents Google from blocking the headless browser
+                "--use-fake-device-for-media-stream", # Feeds a blank stream instead of webcam
+                "--disable-blink-features=AutomationControlled", # Prevents bot detection
+                "--lang=en-US",
             ]
 
             profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_profile")
             os.makedirs(profile_dir, exist_ok=True)
 
-            self.context = await p.chromium.launch_persistent_context(
-                user_data_dir=profile_dir,
-                headless=self.headless,
-                args=browser_args,
-                permissions=["microphone", "camera"],
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            )
+            # Attempt to use local Google Chrome if available for maximum authenticity
+            launch_kwargs = {
+                "user_data_dir": profile_dir,
+                "headless": self.headless,
+                "args": browser_args,
+                "permissions": ["microphone", "camera"],
+                "locale": "en-US",
+                "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            }
+
+            try:
+                self.context = await p.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
+                logger.info("Launched using installed Google Chrome channel.")
+            except Exception as chrome_err:
+                logger.debug(f"Chrome channel unavailable ({chrome_err}); launching Chromium.")
+                self.context = await p.chromium.launch_persistent_context(**launch_kwargs)
+
             self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
 
             # Prevent automation detection
@@ -157,21 +169,27 @@ class AegisMeetBot:
             # Check if Google Meet blocked unauthenticated guest entry
             try:
                 body_text = await self.page.inner_text("body")
-                if "You can't join this video call" in body_text:
+                is_blocked = (
+                    "You can't join this video call" in body_text
+                    or "Je kunt niet deelnemen" in body_text
+                    or "No one can join a meeting unless invited" in body_text
+                )
+                if is_blocked:
                     logger.error(
                         "\n" + "=" * 80 + "\n"
                         "🚨 [GOOGLE MEET ACCESS RESTRICTION DETECTED]\n"
                         "Google Meet returned: \"You can't join this video call\"\n"
                         "Root Cause: Anonymous guest entry is blocked by Google Meet Host Controls (Trusted/Restricted mode).\n\n"
-                        "HOW TO SOLVE FOR LIVE TEST:\n"
-                        "Option 1 (Instant): In your active Google Meet tab, click Host Controls (blue shield icon, bottom right) -> change 'Meeting access type' from 'Trusted' to 'Open'.\n"
-                        "Option 2 (One-Time Login): Run './backend/venv/bin/python backend/bot.py --login' to sign into Google once.\n"
-                        "Option 3 (Safe Pitch Fallback): Use the 'Emergency Fallback: Manual Transcript Intake' card on http://localhost:3000.\n"
+                        "3 WAYS TO RUN THE LIVE DEMO NOW:\n"
+                        "Option 1 (Instant Zero-Setup): Open your active Meet tab in Chrome, press Cmd+Option+I (Console), and paste:\n"
+                        "  (async()=>{const s=document.createElement('script');s.src='http://localhost:8000/aegis-meet.js';document.body.appendChild(s);})()\n"
+                        "Option 2 (Host Controls): In your active Meet window, click Host Controls (blue shield icon, bottom right) -> change Meeting Access to 'Open'.\n"
+                        "Option 3 (1-Time Sign-In): Run './backend/venv/bin/python backend/bot.py --login' to sign in once.\n"
                         + "=" * 80 + "\n"
                     )
                     await self.send_intake_chunk(
                         "System Notice",
-                        "Google Meet blocked guest bot. Host must switch Meeting Access to 'Open' in Host Controls (Shield icon)."
+                        "Google Meet blocked guest bot. Run In-Tab script via Console or set Host Controls Meeting Access to 'Open'."
                     )
                     await self.context.close()
                     return None
@@ -180,7 +198,11 @@ class AegisMeetBot:
 
             # Dismiss common Google Meet camera/mic prompt modals
             try:
-                dismiss_btn = self.page.locator('button:has-text("Continue without microphone and camera"), button:has-text("Dismiss"), button[aria-label="Dismiss"]')
+                dismiss_btn = self.page.locator(
+                    'button:has-text("Continue without microphone and camera"), '
+                    'button:has-text("Doorgaan zonder microfoon en camera"), '
+                    'button:has-text("Dismiss"), button:has-text("Sluiten"), button[aria-label="Dismiss"]'
+                )
                 if await dismiss_btn.count() > 0 and await dismiss_btn.first.is_visible():
                     await dismiss_btn.first.click()
                     logger.info("Dismissed Google Meet permission dialog.")
@@ -200,7 +222,7 @@ class AegisMeetBot:
 
             # Step 2: Mute mic & camera
             try:
-                mic_button = self.page.locator('button[aria-label*="turn off microphone" i], div[data-is-muted="false"]')
+                mic_button = self.page.locator('button[aria-label*="turn off microphone" i], button[aria-label*="microfoon uitschakelen" i], div[data-is-muted="false"]')
                 if await mic_button.count() > 0 and await mic_button.first.is_visible():
                     await mic_button.first.click()
                     logger.info("Microphone muted.")
@@ -208,7 +230,7 @@ class AegisMeetBot:
                 pass
 
             try:
-                cam_button = self.page.locator('button[aria-label*="turn off camera" i]')
+                cam_button = self.page.locator('button[aria-label*="turn off camera" i], button[aria-label*="camera uitschakelen" i]')
                 if await cam_button.count() > 0 and await cam_button.first.is_visible():
                     await cam_button.first.click()
                     logger.info("Camera turned off.")
@@ -221,10 +243,14 @@ class AegisMeetBot:
                 'button:has-text("Ask to join")',
                 'button:has-text("Join now")',
                 'button:has-text("Join")',
+                'button:has-text("Vragen om deel te nemen")',
+                'button:has-text("Nu deelnemen")',
                 'button[jsname="Qx7uuf"]',
                 'button[jsname="jff5ce"]',
                 'span:has-text("Ask to join")',
                 'span:has-text("Join now")',
+                'div[role="button"]:has-text("Ask to join")',
+                'div[role="button"]:has-text("Join now")',
             ]
             joined = False
             for btn_selector in join_buttons:
@@ -354,16 +380,29 @@ async def login_flow():
     os.makedirs(profile_dir, exist_ok=True)
     logger.info("Opening visible Chromium browser. Sign into your Google account...")
     async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
-            headless=False,
-            args=[
-                "--use-fake-ui-for-media-stream",
-                "--use-fake-device-for-media-stream",
-                "--disable-blink-features=AutomationControlled",
-            ],
-            permissions=["microphone", "camera"],
-        )
+        login_args = [
+            "--use-fake-ui-for-media-stream",
+            "--use-fake-device-for-media-stream",
+            "--disable-blink-features=AutomationControlled",
+            "--lang=en-US",
+        ]
+        try:
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=False,
+                channel="chrome",
+                args=login_args,
+                permissions=["microphone", "camera"],
+                locale="en-US",
+            )
+        except Exception:
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=False,
+                args=login_args,
+                permissions=["microphone", "camera"],
+                locale="en-US",
+            )
         page = context.pages[0] if context.pages else await context.new_page()
         await page.goto("https://accounts.google.com/signin")
         logger.info("Browser open. Please sign in, then close the browser window.")

@@ -41,16 +41,19 @@ Ephemeral PII RAM Dictionary:
 ## 3. API Routes & Networking
 *   `POST /join` & `POST /api/join`: Instant, ad-hoc trigger for Playwright bot to join Google Meet.
 *   `POST /schedule` & `POST /api/schedule`: Schedules Playwright bot to join at specified ISO 8601 `join_time` via AsyncIOScheduler.
-*   `POST /intake` & `POST /api/intake`: Streams live meeting captions from Playwright intake scraper (via DOM MutationObserver).
+*   `POST /intake` & `POST /api/intake`: Streams live meeting captions from Playwright intake scraper or In-Tab script (via DOM MutationObserver).
+*   `GET /aegis-meet.js`: In-Tab Meeting Caption Scraper bookmarklet/script for instant zero-setup injection into any active Google Meet call (bypassing Google Meet's anonymous guest login block).
 *   `POST /summarize`, `POST /api/summarize`, & `POST /api/process`: Manual fallback transcript acceptance and full end-to-end zero-leak processing pipeline.
 *   `POST /api/mask`: Dedicated masking verification endpoint.
 *   `GET /api/tasks`: Read stored tokenized tasks from SQLite.
 *   `GET /api/audit-logs`: Real-time telemetry verifying zero PII leakage.
 *   `GET /api/webhooks/feed`: Telemetry stream of dispatched webhook briefs.
+*   `GET /mock-meet`: Authentic Google Meet DOM simulator for offline/air-gapped live testing.
 *   **Live Testing Protocol:**
-    *   **Browser Bypass:** Playwright must launch Chromium with `--use-fake-ui-for-media-stream`, `--use-fake-device-for-media-stream`, and `--disable-blink-features=AutomationControlled` to auto-accept Meet microphone/camera prompts.
-    *   **DOM Interaction:** The bot must wait for the host to "Admit" it, then automatically locate and click the `[aria-label="Turn on captions"]` (CC) button.
+    *   **Browser Bypass:** Playwright launches Chromium/Chrome (`channel="chrome"` where available) with `--use-fake-ui-for-media-stream`, `--use-fake-device-for-media-stream`, `--disable-blink-features=AutomationControlled`, and `--lang=en-US` to auto-accept Meet microphone/camera prompts and prevent locale mismatches.
+    *   **DOM Interaction:** The bot waits for the host to "Admit" it, then automatically locates and clicks the `[aria-label="Turn on captions"]` (CC) button or sends keyboard shortcut 'c'.
     *   **Caption Scraping:** The bot uses a DOM MutationObserver to stream new text nodes as they appear and sends them to the local proxy via `POST /intake`.
+    *   **In-Tab Scraper Fallback:** When Google Meet Host Controls restrict anonymous guest bots ("You can't join this video call"), hosts can inject `/aegis-meet.js` directly into their active Meet tab via DevTools Console or Bookmarklet to stream captions natively with zero authentication friction.
     *   **X-Ray Logging:** The FastAPI server must console-log the `RAW:` text alongside the `MASKED:` text during the Presidio step to prove zero-leak compliance during the demo.
     *   **Fallback:** Include a manual POST endpoint to accept hardcoded transcripts just in case the Google Meet DOM changes during the hackathon.
 

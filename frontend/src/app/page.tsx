@@ -28,6 +28,10 @@ import {
   Video,
   Calendar,
   Play,
+  Copy,
+  Check,
+  Code,
+  ExternalLink,
 } from "lucide-react";
 
 const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL || "http://localhost:8000";
@@ -122,6 +126,8 @@ export default function Dashboard() {
   const [joinLoading, setJoinLoading] = useState<boolean>(false);
   const [scheduleLoading, setScheduleLoading] = useState<boolean>(false);
   const [schedulerNotice, setSchedulerNotice] = useState<{ message: string; type: "success" | "error" } | null>(null);
+  const [showInTabGuide, setShowInTabGuide] = useState<boolean>(true);
+  const [copiedSnippet, setCopiedSnippet] = useState<boolean>(false);
 
   // Health & Task Polling
   const checkHealth = async () => {
@@ -412,10 +418,29 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
             {/* Meet URL */}
             <div className="md:col-span-6 space-y-1.5">
-              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
-                <Video className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Google Meet URL</span>
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
+                  <Video className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Google Meet URL</span>
+                </label>
+                <div className="flex items-center space-x-2">
+                  <button
+                    type="button"
+                    onClick={() => setMeetUrl("http://localhost:8000/mock-meet")}
+                    className="text-[11px] text-cyan-400 hover:text-cyan-300 bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-800/80 px-2 py-0.5 rounded-md transition-all flex items-center space-x-1"
+                  >
+                    <span>🎯 Fill Mock Meet</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowInTabGuide(!showInTabGuide)}
+                    className="text-[11px] text-indigo-400 hover:text-indigo-300 bg-indigo-950/60 hover:bg-indigo-900/60 border border-indigo-800/80 px-2 py-0.5 rounded-md transition-all flex items-center space-x-1"
+                  >
+                    <Code className="w-3 h-3" />
+                    <span>In-Tab Scraper</span>
+                  </button>
+                </div>
+              </div>
               <div className="relative">
                 <input
                   type="text"
@@ -472,6 +497,59 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
+
+          {/* In-Tab Scraper Guidance Card */}
+          {showInTabGuide && (
+            <div className="mt-5 p-4 rounded-xl bg-slate-950/90 border border-indigo-500/40 text-xs space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2 text-indigo-300 font-semibold">
+                  <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"></span>
+                  <span>🚀 Instant In-Tab Scraper (Zero-Setup for Your Active Google Meet Tab)</span>
+                </div>
+                <span className="text-[10px] text-slate-400 bg-slate-900 border border-slate-800 px-2 py-0.5 rounded">
+                  Bypasses Google Guest Blocks
+                </span>
+              </div>
+              <p className="text-slate-300 leading-relaxed">
+                If Google Meet rejects the guest bot with <em>&quot;You can&apos;t join this video call&quot;</em>, simply run our live scraper directly in your active Meet tab in Chrome:
+              </p>
+              <div className="flex items-center space-x-2 bg-slate-900 border border-slate-800 rounded-lg p-2.5">
+                <code className="text-xs text-indigo-300 font-mono flex-1 overflow-x-auto select-all">
+                  {`(async()=>{const s=document.createElement('script');s.src='http://localhost:8000/aegis-meet.js';document.body.appendChild(s);})()`}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(`(async()=>{const s=document.createElement('script');s.src='http://localhost:8000/aegis-meet.js';document.body.appendChild(s);})()`);
+                    setCopiedSnippet(true);
+                    setTimeout(() => setCopiedSnippet(false), 2000);
+                  }}
+                  className="px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium flex items-center space-x-1.5 transition-all flex-shrink-0"
+                >
+                  {copiedSnippet ? <Check className="w-3.5 h-3.5 text-emerald-300" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedSnippet ? "Copied!" : "Copy Snippet"}</span>
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-[11px] text-slate-400">
+                <div className="bg-slate-900/60 p-2 rounded border border-slate-800/80">
+                  <strong className="text-slate-200">Step 1:</strong> In your active Meet window, press <kbd className="text-indigo-300 bg-slate-800 px-1 py-0.5 rounded">Cmd+Option+I</kbd> (Mac) or <kbd className="text-indigo-300 bg-slate-800 px-1 py-0.5 rounded">F12</kbd>.
+                </div>
+                <div className="bg-slate-900/60 p-2 rounded border border-slate-800/80">
+                  <strong className="text-slate-200">Step 2:</strong> Click the <strong className="text-slate-200">Console</strong> tab and paste the snippet above.
+                </div>
+                <div className="bg-slate-900/60 p-2 rounded border border-slate-800/80">
+                  <strong className="text-slate-200">Step 3:</strong> Hit <strong className="text-slate-200">Enter</strong>. Captions stream in real-time to this dashboard!
+                </div>
+              </div>
+              <div className="text-[11px] text-slate-500 flex items-center space-x-1 pt-1 border-t border-slate-800/60">
+                <span>Want to use the autonomous Playwright bot instead? Set</span>
+                <span className="text-slate-400 font-medium">Host Controls (Shield icon) ➔ Meeting access ➔ Open</span>
+                <span>or run</span>
+                <code className="text-indigo-400 bg-slate-900 px-1 py-0.5 rounded">python backend/bot.py --login</code>
+                <span>once to sign in.</span>
+              </div>
+            </div>
+          )}
 
           {/* Status Alert Banner */}
           {schedulerNotice && (

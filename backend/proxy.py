@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from fastapi import FastAPI, HTTPException, status, BackgroundTasks
+from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import httpx
@@ -589,6 +590,277 @@ def health_check():
         "scheduler_running": scheduler.running,
         "ephemeral_tokens_in_ram": len(_EPHEMERAL_PII_RAM),
     }
+
+
+@app.get("/mock-meet", response_class=HTMLResponse)
+def mock_google_meet_endpoint():
+    """
+    Simulated Google Meet DOM for 100% reliable offline testing and hackathon judging demo.
+    Exposes authentic Google Meet selectors:
+    - [aria-label="Turn on captions"]
+    - div[jsname="YSxPtf"], div.a4bIc
+    - div.zs75Ib (speaker labels)
+    """
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Meet - AegisMeet Live Scraper Testing Call</title>
+    <style>
+        body { margin: 0; background: #202124; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        header { padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #3c4043; background: #28292c; }
+        .stage { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 24px; position: relative; }
+        .video-tile { background: #3c4043; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; font-weight: 500; position: relative; border: 1px solid #5f6368; }
+        .video-tile span { position: absolute; bottom: 12px; left: 16px; background: rgba(0,0,0,0.6); padding: 4px 8px; border-radius: 6px; font-size: 0.85rem; }
+        .captions-overlay { position: absolute; bottom: 80px; left: 10%; right: 10%; background: rgba(32,33,36,0.94); border: 1px solid #5f6368; border-radius: 12px; padding: 16px 20px; min-height: 50px; display: none; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+        .captions-overlay.active { display: block; }
+        .footer-controls { height: 80px; background: #202124; display: flex; align-items: center; justify-content: center; gap: 16px; border-top: 1px solid #3c4043; }
+        button { background: #3c4043; color: white; border: none; padding: 12px 20px; border-radius: 24px; cursor: pointer; font-size: 0.9rem; font-weight: 500; display: flex; align-items: center; gap: 8px; transition: background 0.2s; }
+        button:hover { background: #4f5358; }
+        button.active { background: #8ab4f8; color: #202124; }
+        .badge { background: #137333; color: #e6f4ea; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <header>
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="font-size: 1.1rem; font-weight: 600;">Google Meet: AegisMeet Security Sync</div>
+            <span class="badge">LIVE DOM TESTING</span>
+        </div>
+        <div id="status-indicator" style="font-size: 0.85rem; color: #9aa0a6;">Captions: Click "Turn on captions" or press 'c'</div>
+    </header>
+
+    <div class="stage">
+        <div class="video-tile">
+            <div>👤 Mayank Sachdeva</div>
+            <span>Mayank Sachdeva (Host)</span>
+        </div>
+        <div class="video-tile">
+            <div>👤 Rohith</div>
+            <span>Rohith (Proxy Lead)</span>
+        </div>
+
+        <div id="caption-box" class="captions-overlay">
+            <div jscontroller="D1tHje">
+                <div class="zs75Ib" style="font-weight: bold; color: #8ab4f8; margin-bottom: 4px;" id="speaker-name">Mayank Sachdeva</div>
+                <div jsname="YSxPtf" class="a4bIc" id="caption-text" style="font-size: 1.05rem; line-height: 1.4;">Connecting caption stream...</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer-controls">
+        <button id="mic-btn" aria-label="Turn off microphone">🎤 Mic</button>
+        <button id="cam-btn" aria-label="Turn off camera">📹 Cam</button>
+        <button id="cc-btn" aria-label="Turn on captions" onclick="toggleCaptions()">💬 Turn on captions</button>
+        <button id="leave-btn" aria-label="Leave call" style="background: #ea4335;">📞 Leave call</button>
+    </div>
+
+    <script>
+        const speechQueue = [
+            { speaker: "Mayank Sachdeva", text: "Good morning team. We are live testing the AegisMeet Playwright scraping and Presidio zero-leak pipeline." },
+            { speaker: "Rohith", text: "FastAPI is active on port 8000. Presidio masks names and company entities like Acme Corp before sending to Featherless AI." },
+            { speaker: "Sambhav Chordia", text: "I confirmed that Next.js dual pane correctly displays the sanitized payload on the left and rehydrated views on the right." },
+            { speaker: "Mayank Sachdeva", text: "Rohith, please deploy the Discord and Slack webhooks before 5:00 PM today." },
+            { speaker: "Rohith", text: "Confirmed. I will complete the webhook forwarder and verify SQLite task persistence by 5:00 PM." }
+        ];
+
+        let active = false;
+        let idx = 0;
+
+        function toggleCaptions() {
+            active = !active;
+            const btn = document.getElementById("cc-btn");
+            const box = document.getElementById("caption-box");
+            const status = document.getElementById("status-indicator");
+            if (active) {
+                btn.classList.add("active");
+                btn.innerText = "💬 Captions ON";
+                btn.setAttribute("aria-label", "Turn off captions");
+                box.classList.add("active");
+                status.innerText = "Captions: STREAMING TO PLAYWRIGHT BOT";
+                status.style.color = "#81c995";
+                streamNext();
+            } else {
+                btn.classList.remove("active");
+                btn.innerText = "💬 Turn on captions";
+                btn.setAttribute("aria-label", "Turn on captions");
+                box.classList.remove("active");
+                status.innerText = "Captions: OFF";
+                status.style.color = "#9aa0a6";
+            }
+        }
+
+        window.addEventListener("keydown", (e) => {
+            if (e.key === "c" || e.key === "C") {
+                toggleCaptions();
+            }
+        });
+
+        function streamNext() {
+            if (!active) return;
+            if (idx < speechQueue.length) {
+                const turn = speechQueue[idx];
+                document.getElementById("speaker-name").innerText = turn.speaker;
+                document.getElementById("caption-text").innerText = turn.text;
+                idx++;
+                setTimeout(streamNext, 2000);
+            }
+        }
+    </script>
+</body>
+</html>"""
+
+
+@app.get("/aegis-meet.js", response_class=Response)
+def aegis_meet_script_endpoint():
+    """
+    In-Tab Live Caption Scraper bookmarklet/script.
+    Injected directly into any active Google Meet call to stream captions to localhost:8000
+    without requiring separate Google account login or waiting room admission.
+    """
+    js_content = """(function() {
+    if (window.__AEGIS_LOADED__) {
+        alert("🛡️ AegisMeet is already running in this tab!");
+        return;
+    }
+    window.__AEGIS_LOADED__ = true;
+    console.log("%c[AegisMeet]%c Live In-Tab Scraper active! Streaming captions to http://localhost:8000/api/intake", "color: #38bdf8; font-weight: bold", "color: inherit");
+
+    // 1. Automatically turn on captions if not active
+    function enableCaptions() {
+        const ccBtns = document.querySelectorAll('button[aria-label*="captions" i], button[aria-label*="ondertiteling" i], button[data-tooltip*="captions" i]');
+        for (const btn of ccBtns) {
+            const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+            if (label.includes('turn on') || label.includes('inschakelen')) {
+                btn.click();
+                console.log("[AegisMeet] Turned on captions via UI button.");
+                return;
+            }
+        }
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', code: 'KeyC', bubbles: true }));
+    }
+    enableCaptions();
+
+    // 2. Setup HUD Overlay
+    const hud = document.createElement('div');
+    hud.id = 'aegis-hud';
+    hud.style.cssText = "position:fixed;bottom:85px;right:24px;z-index:999999;background:#0f172a;color:#f8fafc;border:1px solid #38bdf8;border-radius:12px;padding:14px 18px;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:13px;box-shadow:0 10px 25px -5px rgba(0,0,0,0.6), 0 0 15px rgba(56,189,248,0.2);display:flex;flex-direction:column;gap:10px;max-width:320px;";
+    hud.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <div style="font-weight:bold;color:#38bdf8;display:flex;align-items:center;gap:6px;">
+                <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 8px #22c55e;"></span>
+                AegisMeet Scraper
+            </div>
+            <span id="aegis-count" style="background:#1e293b;color:#94a3b8;padding:2px 6px;border-radius:4px;font-size:11px;">0 chunks</span>
+        </div>
+        <div id="aegis-status" style="color:#cbd5e1;font-size:12px;line-height:1.3;">
+            Listening to live Google Meet captions...
+        </div>
+        <div style="display:flex;gap:8px;margin-top:4px;">
+            <button id="aegis-btn-process" style="flex:1;background:#0284c7;color:white;border:none;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">
+                Finalize & Process
+            </button>
+            <button id="aegis-btn-close" style="background:#334155;color:#94a3b8;border:none;padding:6px 10px;border-radius:6px;font-size:12px;cursor:pointer;">
+                ✕
+            </button>
+        </div>
+    `;
+    document.body.appendChild(hud);
+
+    const collectedTexts = [];
+    const seenCaptions = new Set();
+    const countBadge = document.getElementById('aegis-count');
+    const statusText = document.getElementById('aegis-status');
+
+    async function sendIntake(speaker, text) {
+        const key = speaker + "::" + text;
+        if (seenCaptions.has(key)) return;
+        seenCaptions.add(key);
+        collectedTexts.push(`${speaker}: ${text}`);
+        if (countBadge) countBadge.innerText = `${collectedTexts.length} chunks`;
+        if (statusText) statusText.innerText = `[${speaker}]: ${text.substring(0, 32)}...`;
+
+        try {
+            await fetch('http://localhost:8000/api/intake', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ speaker: speaker, caption: text })
+            });
+        } catch (e) {
+            console.warn('[AegisMeet] Intake stream skipped:', e);
+        }
+    }
+
+    // 3. MutationObserver for Google Meet Caption Nodes
+    const observer = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            for (const node of m.addedNodes) {
+                if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) {
+                    const txt = (node.textContent || '').trim();
+                    if (txt.length > 2) {
+                        let speaker = "Participant";
+                        const parent = node.parentElement ? node.parentElement.closest('div[jscontroller="D1tHje"], div.nM9PId') : null;
+                        if (parent) {
+                            const nameEl = parent.querySelector('.zs75Ib, .jxFHg, .NWtEwe');
+                            if (nameEl && nameEl.textContent) speaker = nameEl.textContent.trim();
+                        }
+                        sendIntake(speaker, txt);
+                    }
+                }
+            }
+        }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    // Periodic Polling Fallback
+    const pollInterval = setInterval(() => {
+        const captionNodes = document.querySelectorAll('div[jsname="YSxPtf"], .a4bIc span');
+        captionNodes.forEach(el => {
+            const txt = (el.textContent || '').trim();
+            if (txt.length > 2) {
+                let speaker = "Participant";
+                const parent = el.closest('div[jscontroller="D1tHje"], div.nM9PId');
+                if (parent) {
+                    const nameEl = parent.querySelector('.zs75Ib, .jxFHg, .NWtEwe');
+                    if (nameEl && nameEl.textContent) speaker = nameEl.textContent.trim();
+                }
+                sendIntake(speaker, txt);
+            }
+        });
+    }, 1500);
+
+    // 4. Trigger Final Processing
+    document.getElementById('aegis-btn-process').onclick = async () => {
+        const fullTranscript = collectedTexts.join('\\n').trim();
+        if (!fullTranscript) {
+            alert('No captions captured yet. Please speak or wait for speech in the meeting.');
+            return;
+        }
+        statusText.innerText = 'Analyzing with Presidio & Featherless AI...';
+        try {
+            const res = await fetch('http://localhost:8000/api/process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ transcript: fullTranscript })
+            });
+            await res.json();
+            statusText.innerText = '✅ Zero-Leak Processing Complete!';
+            alert('🛡️ AegisMeet: Post-meeting briefing generated! Check your dashboard at http://localhost:3000');
+        } catch (err) {
+            statusText.innerText = 'Error: ' + err.message;
+        }
+    };
+
+    document.getElementById('aegis-btn-close').onclick = () => {
+        observer.disconnect();
+        clearInterval(pollInterval);
+        hud.remove();
+        window.__AEGIS_LOADED__ = false;
+        console.log('[AegisMeet] Scraper disconnected.');
+    };
+})();"""
+    return Response(content=js_content, media_type="application/javascript")
 
 
 @app.post("/join")
