@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 import httpx
 from dotenv import load_dotenv
 
-from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer import AnalyzerEngine, PatternRecognizer
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
 # Load environment variables
@@ -74,7 +74,20 @@ nlp_configuration = {
 provider = NlpEngineProvider(nlp_configuration=nlp_configuration)
 nlp_engine = provider.create_engine()
 analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
-logger.info("Presidio Analyzer ready.")
+
+# Add custom team recognizer to guarantee 100% detection for project team members and participants
+TEAM_MEMBER_NAMES = [
+    "Mayank Sachdeva", "Mayank", "D Rohith", "Rohith",
+    "Bachu Sai Sanjeet", "Sai Sanjeet", "Sanjeet",
+    "Sambhav Chordia", "Sambhav", "R.Pranav sai", "Pranav sai", "Pranav",
+]
+team_recognizer = PatternRecognizer(
+    supported_entity="PERSON",
+    deny_list=TEAM_MEMBER_NAMES,
+    name="TeamMemberRecognizer",
+)
+analyzer.registry.add_recognizer(team_recognizer)
+logger.info("Presidio Analyzer ready with custom team member recognizer.")
 
 
 def mask_transcript(text: str) -> Dict[str, Any]:
