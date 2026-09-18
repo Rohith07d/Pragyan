@@ -133,24 +133,64 @@ class AegisMeetBot:
                 "--disable-blink-features=AutomationControlled" # Prevents Google from blocking the headless browser
             ]
 
-            self.browser = await p.chromium.launch(
+            profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_profile")
+            os.makedirs(profile_dir, exist_ok=True)
+
+            self.context = await p.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
                 headless=self.headless,
                 args=browser_args,
-            )
-            self.context = await self.browser.new_context(
                 permissions=["microphone", "camera"],
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
             )
-            self.page = await self.context.new_page()
+            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+
+            # Prevent automation detection
+            await self.page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            """)
 
             logger.info(f"Navigating to {self.meeting_url}...")
-            await self.page.goto(self.meeting_url, wait_until="networkidle", timeout=60000)
+            await self.page.goto(self.meeting_url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(4)
 
-            # Step 1: Handle Lobby (Dismiss initial permission popups)
-            await asyncio.sleep(3)
+            # Check if Google Meet blocked unauthenticated guest entry
             try:
-                # Enter Name input if lobby requires it
-                name_input = self.page.locator('input[type="text"], input[aria-label*="name" i]')
+                body_text = await self.page.inner_text("body")
+                if "You can't join this video call" in body_text:
+                    logger.error(
+                        "\n" + "=" * 80 + "\n"
+                        "🚨 [GOOGLE MEET ACCESS RESTRICTION DETECTED]\n"
+                        "Google Meet returned: \"You can't join this video call\"\n"
+                        "Root Cause: Anonymous guest entry is blocked by Google Meet Host Controls (Trusted/Restricted mode).\n\n"
+                        "HOW TO SOLVE FOR LIVE TEST:\n"
+                        "Option 1 (Instant): In your active Google Meet tab, click Host Controls (blue shield icon, bottom right) -> change 'Meeting access type' from 'Trusted' to 'Open'.\n"
+                        "Option 2 (One-Time Login): Run './backend/venv/bin/python backend/bot.py --login' to sign into Google once.\n"
+                        "Option 3 (Safe Pitch Fallback): Use the 'Emergency Fallback: Manual Transcript Intake' card on http://localhost:3000.\n"
+                        + "=" * 80 + "\n"
+                    )
+                    await self.send_intake_chunk(
+                        "System Notice",
+                        "Google Meet blocked guest bot. Host must switch Meeting Access to 'Open' in Host Controls (Shield icon)."
+                    )
+                    await self.context.close()
+                    return None
+            except Exception as e:
+                logger.debug(f"Block check error: {e}")
+
+            # Dismiss common Google Meet camera/mic prompt modals
+            try:
+                dismiss_btn = self.page.locator('button:has-text("Continue without microphone and camera"), button:has-text("Dismiss"), button[aria-label="Dismiss"]')
+                if await dismiss_btn.count() > 0 and await dismiss_btn.first.is_visible():
+                    await dismiss_btn.first.click()
+                    logger.info("Dismissed Google Meet permission dialog.")
+                    await asyncio.sleep(1)
+            except Exception:
+                pass
+
+            # Step 1: Handle Lobby (Enter Name if requested)
+            try:
+                name_input = self.page.locator('input[type="text"], input[aria-label*="name" i], input[placeholder*="name" i], input[jsname="YPqjbf"]')
                 if await name_input.count() > 0 and await name_input.first.is_visible():
                     logger.info(f"Setting bot name: '{self.bot_name}'")
                     await name_input.first.fill(self.bot_name)
@@ -181,6 +221,8 @@ class AegisMeetBot:
                 'button:has-text("Ask to join")',
                 'button:has-text("Join now")',
                 'button:has-text("Join")',
+                'button[jsname="Qx7uuf"]',
+                'button[jsname="jff5ce"]',
                 'span:has-text("Ask to join")',
                 'span:has-text("Join now")',
             ]
@@ -300,7 +342,37 @@ class AegisMeetBot:
             # Cleanup and trigger processing
             logger.info("Meeting monitoring completed.")
             await self.trigger_final_processing()
-            await self.browser.close()
+            if self.context:
+                await self.context.close()
+            elif self.browser:
+                await self.browser.close()
+
+
+async def login_flow():
+    """Opens a visible Chromium window for one-time Google Account sign-in."""
+    profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+    logger.info("Opening visible Chromium browser. Sign into your Google account...")
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            headless=False,
+            args=[
+                "--use-fake-ui-for-media-stream",
+                "--use-fake-device-for-media-stream",
+                "--disable-blink-features=AutomationControlled",
+            ],
+            permissions=["microphone", "camera"],
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
+        await page.goto("https://accounts.google.com/signin")
+        logger.info("Browser open. Please sign in, then close the browser window.")
+        try:
+            while len(context.pages) > 0 and not page.is_closed():
+                await asyncio.sleep(2)
+        except Exception:
+            pass
+        logger.info("Login session successfully saved to .bot_profile!")
 
 
 async def run_live_bot(
@@ -331,9 +403,14 @@ async def main():
     parser.add_argument("--proxy-url", type=str, default=DEFAULT_PROXY_URL, help="URL of the local FastAPI proxy")
     parser.add_argument("--headless", action="store_true", default=True, help="Run browser in headless mode")
     parser.add_argument("--simulate", action="store_true", help="Run simulated speech caption stream")
+    parser.add_argument("--login", action="store_true", help="Open visible browser to sign into Google account once")
     parser.add_argument("--duration", type=int, default=120, help="Maximum call duration in seconds")
 
     args = parser.parse_args()
+
+    if args.login:
+        await login_flow()
+        return
 
     bot = AegisMeetBot(
         meeting_url=args.url,
