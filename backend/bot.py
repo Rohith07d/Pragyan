@@ -2,7 +2,7 @@
 AegisMeet: Intake Agent (Headless Playwright Caption Scraper)
 ============================================================
 Automated browser bot that:
-1. Joins Google Meet calls headlessly with microphone & camera disabled.
+1. Joins Google Meet calls with microphone & camera disabled.
 2. Enters meeting lobby, sets custom display name, and requests join.
 3. Automatically enables Closed Captions ('c').
 4. Observes DOM mutation on caption containers to extract live speaker text.
@@ -54,18 +54,32 @@ def cleanup_profile_locks(profile_dir: str):
                 pass
 
 
+def get_native_chrome_path() -> Optional[str]:
+    """Returns the path to native Google Chrome on macOS or Linux."""
+    mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if os.path.exists(mac_chrome):
+        return mac_chrome
+    linux_chrome = "/usr/bin/google-chrome"
+    if os.path.exists(linux_chrome):
+        return linux_chrome
+    return None
+
+
 class AegisMeetBot:
     def __init__(
         self,
         meeting_url: Optional[str] = None,
         bot_name: str = "AegisMeet Notetaker",
         proxy_url: str = DEFAULT_PROXY_URL,
-        headless: bool = True,
+        headless: bool = False,
+        cdp_port: int = 9222,
     ):
         self.meeting_url = meeting_url
         self.bot_name = bot_name
         self.proxy_url = proxy_url.rstrip("/")
         self.headless = headless
+        self.cdp_port = cdp_port
+        self.chrome_proc: Optional[subprocess.Popen] = None
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -129,338 +143,370 @@ class AegisMeetBot:
 
     async def join_google_meet(self, max_duration_sec: int = 300):
         """
-        Launches Playwright Chromium with media stream permissions bypassed,
-        joins the Google Meet call, enables captions, and monitors caption DOM elements.
+        Launches Google Chrome (via CDP for 100% native macOS Keychain & cookies),
+        enters the lobby, handles name & media toggles, clicks Ask to Join,
+        enables Closed Captions, and streams captions in real time.
         """
         if not self.meeting_url:
             raise ValueError("Meeting URL must be provided to join a live meeting.")
 
-        logger.info(f"Launching Playwright Chromium (headless={self.headless})...")
-        async with async_playwright() as p:
-            # Grant fake media streams to avoid browser mic/cam permission blocks
-            # Browser Bypass: Auto-accept media streams and prevent automation detection
-            # Browser Bypass: Auto-accept media streams, force en-US locale, and avoid automation flags
-            browser_args = [
-                "--use-fake-ui-for-media-stream",     # Auto-accepts permission prompts
-                "--use-fake-device-for-media-stream", # Feeds a blank stream instead of webcam
-                "--disable-blink-features=AutomationControlled", # Prevents bot detection
-                "--lang=en-US",
-            ]
+        profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_profile")
+        os.makedirs(profile_dir, exist_ok=True)
+        cleanup_profile_locks(profile_dir)
 
-            profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_profile")
-            os.makedirs(profile_dir, exist_ok=True)
-            cleanup_profile_locks(profile_dir)
+        chrome_bin = get_native_chrome_path()
+        use_cdp = chrome_bin is not None
 
-            # Attempt to use local Google Chrome if available for maximum authenticity
-            launch_kwargs = {
-                "user_data_dir": profile_dir,
-                "headless": self.headless,
-                "args": browser_args,
-                "permissions": ["microphone", "camera"],
-                "locale": "en-US",
-                "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            }
+        try:
+            async with async_playwright() as p:
+                if use_cdp:
+                    # Launch native Chrome with CDP port
+                    # Using native Chrome preserves the real macOS Keychain so signed-in Google sessions persist
+                    logger.info(f"Launching native Google Chrome on CDP port {self.cdp_port}...")
+                    chrome_args = [
+                        chrome_bin,
+                        f"--remote-debugging-port={self.cdp_port}",
+                        f"--user-data-dir={profile_dir}",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "--use-fake-ui-for-media-stream",
+                        "--use-fake-device-for-media-stream",
+                        "--lang=en-US",
+                        "--accept-lang=en-US,en;q=0.9",
+                    ]
+                    if self.headless:
+                        chrome_args.append("--headless=new")
+                    chrome_args.append("about:blank")
 
-            try:
-                self.context = await p.chromium.launch_persistent_context(channel="chrome", **launch_kwargs)
-                logger.info("Launched using installed Google Chrome channel.")
-            except Exception as chrome_err:
-                logger.debug(f"Chrome channel unavailable ({chrome_err}); launching Chromium.")
-                self.context = await p.chromium.launch_persistent_context(**launch_kwargs)
+                    self.chrome_proc = subprocess.Popen(
+                        chrome_args,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
 
-            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+                    # Poll for CDP readiness
+                    cdp_ready = False
+                    for _ in range(20):
+                        try:
+                            async with httpx.AsyncClient() as client:
+                                r = await client.get(f"http://127.0.0.1:{self.cdp_port}/json/version", timeout=1.0)
+                                if r.status_code == 200:
+                                    cdp_ready = True
+                                    break
+                        except Exception:
+                            await asyncio.sleep(0.4)
 
-            # Prevent automation detection
-            await self.page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            """)
+                    if not cdp_ready:
+                        raise RuntimeError(f"Native Chrome failed to respond on CDP port {self.cdp_port}")
 
-            logger.info(f"Navigating to {self.meeting_url}...")
-            await self.page.goto(self.meeting_url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(4)
+                    self.browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{self.cdp_port}")
+                    self.context = self.browser.contexts[0]
+                    self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+                    logger.info("Connected to native Google Chrome via CDP.")
+                else:
+                    # Fallback for Linux CI / environments without native Chrome
+                    logger.info("Native Chrome binary not found; launching Playwright Chromium.")
+                    browser_args = [
+                        "--use-fake-ui-for-media-stream",
+                        "--use-fake-device-for-media-stream",
+                        "--disable-blink-features=AutomationControlled",
+                        "--lang=en-US",
+                    ]
+                    self.context = await p.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        headless=self.headless,
+                        args=browser_args,
+                        permissions=["microphone", "camera"],
+                        locale="en-US",
+                    )
+                    self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
 
-            # Check if Google Meet blocked unauthenticated guest entry
-            try:
-                body_text = await self.page.inner_text("body")
-                is_blocked = (
-                    "You can't join this video call" in body_text
-                    or "Je kunt niet deelnemen" in body_text
-                    or "No one can join a meeting unless invited" in body_text
-                )
-                if is_blocked:
-                    if not self.headless:
-                        logger.warning("Google Meet lobby not ready or host not admitted yet. Keeping visible window open for up to 30s...")
-                        for _ in range(10):
-                            await asyncio.sleep(3)
-                            body_text = await self.page.inner_text("body")
-                            if "You can't join this video call" not in body_text and "Je kunt niet deelnemen" not in body_text:
-                                is_blocked = False
-                                break
-                    if is_blocked:
+                # Anti-detection script
+                await self.page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                """)
+
+                logger.info(f"Navigating to {self.meeting_url}...")
+                await self.page.goto(self.meeting_url, wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(3)
+
+                # Step 1: Dismiss informational popups & permission warnings
+                dismiss_selectors = [
+                    'button:has-text("Got it")',
+                    'button:has-text("Begrepen")',
+                    'button:has-text("Continue without microphone and camera")',
+                    'button:has-text("Doorgaan zonder microfoon en camera")',
+                    'button:has-text("Dismiss")',
+                    'button:has-text("Sluiten")',
+                    'button[aria-label="Dismiss"]',
+                ]
+                for sel in dismiss_selectors:
+                    try:
+                        btn = self.page.locator(sel)
+                        if await btn.count() > 0 and await btn.first.is_visible():
+                            await btn.first.click()
+                            logger.info(f"Dismissed modal ({sel})")
+                            await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
+
+                # Step 2: Handle Name Input (when joining as guest)
+                try:
+                    name_input = self.page.locator(
+                        'input[placeholder*="name" i], input[aria-label*="name" i], input[type="text"]'
+                    )
+                    if await name_input.count() > 0 and await name_input.first.is_visible():
+                        logger.info(f"Setting bot display name: '{self.bot_name}'")
+                        await name_input.first.click()
+                        await name_input.first.fill(self.bot_name)
+                        await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.debug(f"Name input step passed: {e}")
+
+                # Step 3: Mute Microphone & Turn Off Camera
+                try:
+                    mic_btn = self.page.locator(
+                        'button[aria-label*="turn off microphone" i], button[aria-label*="microfoon uitschakelen" i], div[data-is-muted="false"]'
+                    )
+                    if await mic_btn.count() > 0 and await mic_btn.first.is_visible():
+                        await mic_btn.first.click()
+                        logger.info("Microphone muted.")
+                except Exception:
+                    pass
+
+                try:
+                    cam_btn = self.page.locator(
+                        'button[aria-label*="turn off camera" i], button[aria-label*="camera uitschakelen" i]'
+                    )
+                    if await cam_btn.count() > 0 and await cam_btn.first.is_visible():
+                        await cam_btn.first.click()
+                        logger.info("Camera turned off.")
+                except Exception:
+                    pass
+
+                await asyncio.sleep(1)
+
+                # Step 4: Click 'Ask to join' or 'Join now'
+                logger.info("Attempting to join meeting call...")
+                join_selectors = [
+                    'button:has-text("Ask to join")',
+                    'button:has-text("Join now")',
+                    'button:has-text("Join")',
+                    'button:has-text("Vragen om deel te nemen")',
+                    'button:has-text("Nu deelnemen")',
+                    'button[jsname="Qx7uuf"]',
+                    'button[jsname="jff5ce"]',
+                ]
+                joined = False
+                for sel in join_selectors:
+                    btn = self.page.locator(sel)
+                    if await btn.count() > 0 and await btn.first.is_visible() and await btn.first.is_enabled():
+                        await btn.first.click()
+                        joined = True
+                        logger.info(f"Clicked join button ({sel})")
+                        break
+
+                if not joined:
+                    # In mock-meet or custom lobbies, try keyboard enter
+                    logger.info("No active button selector found; pressing Enter.")
+                    await self.page.keyboard.press("Enter")
+
+                # Step 5: Check if Google Meet rejected guest knock
+                await asyncio.sleep(3)
+                try:
+                    body_text = await self.page.inner_text("body")
+                    is_restricted = (
+                        "You can't join this video call" in body_text
+                        or "Je kunt niet deelnemen" in body_text
+                        or "Your meeting is safe" in body_text
+                    )
+                    if is_restricted:
                         logger.error(
                             "\n" + "=" * 80 + "\n"
                             "🚨 [GOOGLE MEET ACCESS RESTRICTION DETECTED]\n"
                             "Google Meet returned: \"You can't join this video call\"\n"
-                            "Common Causes:\n"
-                            "1. The host is not inside the meeting yet (Google Meet shuts down the lobby when host is absent).\n"
-                            "2. The meeting URL is expired or invalid.\n"
-                            "3. Host Controls has guest entry set to Restricted/Trusted instead of Open.\n"
-                            + "=" * 80 + "\n"
+                            "Root Cause: Host Controls in Google Meet are set to 'Trusted', blocking unauthenticated guest bots.\n\n"
+                            "👉 1-CLICK FIX: In your Google Meet call window, click the blue shield icon at bottom right (Host controls)\n"
+                            "   and switch Meeting access to 'Open' (or toggle Host management OFF).\n"
+                            "   Then click Join in AegisMeet!\n"
+                            "=" * 80 + "\n"
                         )
                         await self.send_intake_chunk(
                             "System Notice",
-                            "Google Meet lobby not accessible. Ensure host is actively in the call and Meeting Access is set to 'Open'."
+                            "Google Meet Host Controls blocked guest bot. In your Google Meet tab, click the blue shield icon at bottom right (Host controls) and set Meeting Access to 'Open' to allow the bot to enter."
                         )
-                        await self.context.close()
                         return None
-            except Exception as e:
-                logger.debug(f"Block check error: {e}")
+                except Exception as e:
+                    logger.debug(f"Restriction check error: {e}")
 
-            # Dismiss common Google Meet camera/mic prompt modals
-            try:
-                dismiss_btn = self.page.locator(
-                    'button:has-text("Continue without microphone and camera"), '
-                    'button:has-text("Doorgaan zonder microfoon en camera"), '
-                    'button:has-text("Dismiss"), button:has-text("Sluiten"), button[aria-label="Dismiss"]'
+                # Step 6: Wait for meeting host to admit the bot
+                logger.info("Waiting for host to admit bot into Google Meet call...")
+                in_call_sel = (
+                    'button[aria-label*="Turn on captions" i], '
+                    'button[aria-label*="Turn off captions" i], '
+                    'button[aria-label*="captions" i], '
+                    'button[aria-label*="Leave call" i]'
                 )
-                if await dismiss_btn.count() > 0 and await dismiss_btn.first.is_visible():
-                    await dismiss_btn.first.click()
-                    logger.info("Dismissed Google Meet permission dialog.")
+                admitted = False
+                for _ in range(120):  # Wait up to 2 minutes
+                    try:
+                        in_call = self.page.locator(in_call_sel)
+                        if await in_call.count() > 0 and await in_call.first.is_visible():
+                            admitted = True
+                            logger.info("Bot admitted into Google Meet call by host!")
+                            break
+                        body_now = await self.page.inner_text("body")
+                        if "You can't join this video call" in body_now:
+                            logger.warning("Access denied or session rejected.")
+                            break
+                    except Exception:
+                        pass
                     await asyncio.sleep(1)
-            except Exception:
-                pass
 
-            # Step 1: Handle Lobby (Enter Name if requested)
-            try:
-                name_input = self.page.locator('input[type="text"], input[aria-label*="name" i], input[placeholder*="name" i], input[jsname="YPqjbf"]')
-                if await name_input.count() > 0 and await name_input.first.is_visible():
-                    logger.info(f"Setting bot name: '{self.bot_name}'")
-                    await name_input.first.fill(self.bot_name)
-                    await asyncio.sleep(1)
-            except Exception as e:
-                logger.debug(f"Name input handling passed: {e}")
+                if not admitted:
+                    logger.warning("Host admission wait finished or call not yet admitted.")
 
-            # Step 2: Mute mic & camera
-            try:
-                mic_button = self.page.locator('button[aria-label*="turn off microphone" i], button[aria-label*="microfoon uitschakelen" i], div[data-is-muted="false"]')
-                if await mic_button.count() > 0 and await mic_button.first.is_visible():
-                    await mic_button.first.click()
-                    logger.info("Microphone muted.")
-            except Exception:
-                pass
+                # Step 7: Enable Closed Captions
+                logger.info("Locating and clicking captions toggle...")
+                await asyncio.sleep(2)
+                caption_button_clicked = False
+                caption_selectors = [
+                    'button[aria-label="Turn on captions"]',
+                    'button[aria-label*="Turn on captions" i]',
+                    'button[aria-label*="captions" i]',
+                    'button[data-tooltip*="captions" i]',
+                ]
+                for selector in caption_selectors:
+                    try:
+                        btn = self.page.locator(selector)
+                        if await btn.count() > 0 and await btn.first.is_visible():
+                            await btn.first.click()
+                            caption_button_clicked = True
+                            logger.info(f"Clicked caption toggle button ({selector}).")
+                            break
+                    except Exception:
+                        pass
 
-            try:
-                cam_button = self.page.locator('button[aria-label*="turn off camera" i], button[aria-label*="camera uitschakelen" i]')
-                if await cam_button.count() > 0 and await cam_button.first.is_visible():
-                    await cam_button.first.click()
-                    logger.info("Camera turned off.")
-            except Exception:
-                pass
+                if not caption_button_clicked:
+                    await self.page.keyboard.press("c")
+                    logger.info("Sent keyboard shortcut 'c' to enable captions.")
 
-            # Step 3: Click 'Ask to join' or 'Join now'
-            logger.info("Attempting to join meeting call...")
-            join_buttons = [
-                'button:has-text("Ask to join")',
-                'button:has-text("Join now")',
-                'button:has-text("Join")',
-                'button:has-text("Vragen om deel te nemen")',
-                'button:has-text("Nu deelnemen")',
-                'button[jsname="Qx7uuf"]',
-                'button[jsname="jff5ce"]',
-                'span:has-text("Ask to join")',
-                'span:has-text("Join now")',
-                'div[role="button"]:has-text("Ask to join")',
-                'div[role="button"]:has-text("Join now")',
-            ]
-            joined = False
-            for btn_selector in join_buttons:
-                btn = self.page.locator(btn_selector)
-                if await btn.count() > 0 and await btn.first.is_visible():
-                    await btn.first.click()
-                    joined = True
-                    logger.info(f"Clicked join button ({btn_selector})")
-                    break
+                # Step 8: Stream captions via DOM MutationObserver & DOM polling
+                logger.info(f"Listening for captions (monitoring up to {max_duration_sec}s)...")
+                self._is_running = True
+                start_time = time.time()
+                seen_texts = set()
 
-            if not joined:
-                logger.warning("Could not find direct join button; attempting keyboard Enter.")
-                await self.page.keyboard.press("Enter")
+                try:
+                    async def handle_browser_caption(speaker: str, text: str):
+                        clean = text.strip()
+                        if clean and clean not in seen_texts:
+                            seen_texts.add(clean)
+                            await self.send_intake_chunk(speaker, clean)
 
-            # Step 4: Wait to be admitted by the meeting host
-            logger.info("Waiting for host to admit bot into Google Meet call...")
-            try:
-                await self.page.wait_for_selector(
-                    'button[aria-label*="Turn on captions" i], button[aria-label*="Turn off captions" i], button[aria-label*="captions" i], button[aria-label*="Leave call" i]',
-                    timeout=180000  # Wait up to 3 minutes for host to admit
-                )
-                logger.info("Bot admitted into the meeting by host!")
-            except Exception as e:
-                logger.warning(f"Host admission check proceeded: {e}")
+                    await self.page.expose_function("aegisMutationBridge", handle_browser_caption)
 
-            # Step 5: Automatically locate and click [aria-label="Turn on captions"] (CC) button
-            logger.info("Locating and clicking captions toggle...")
-            await asyncio.sleep(2)
-            caption_button_clicked = False
-            caption_selectors = [
-                'button[aria-label="Turn on captions"]',
-                'button[aria-label*="Turn on captions" i]',
-                'button[aria-label*="captions" i]',
-                'button[data-tooltip*="captions" i]',
-            ]
-            for selector in caption_selectors:
-                btn = self.page.locator(selector)
-                if await btn.count() > 0 and await btn.first.is_visible():
-                    await btn.first.click()
-                    caption_button_clicked = True
-                    logger.info(f"Successfully clicked caption toggle button ({selector}).")
-                    break
-
-            if not caption_button_clicked:
-                await self.page.keyboard.press("c")
-                logger.info("Sent keyboard shortcut 'c' to enable captions.")
-
-            # Step 6: Stream captions via DOM MutationObserver & DOM polling
-            logger.info(f"Listening for captions (monitoring up to {max_duration_sec}s)...")
-            self._is_running = True
-            start_time = time.time()
-            seen_texts = set()
-
-            # Expose bridge to browser runtime for real-time MutationObserver
-            try:
-                async def handle_browser_caption(speaker: str, text: str):
-                    clean = text.strip()
-                    if clean and clean not in seen_texts:
-                        seen_texts.add(clean)
-                        await self.send_intake_chunk(speaker, clean)
-
-                await self.page.expose_function("aegisMutationBridge", handle_browser_caption)
-
-                # Attach DOM MutationObserver to stream caption nodes as they appear
-                await self.page.evaluate("""() => {
-                    const observer = new MutationObserver((mutations) => {
-                        for (const m of mutations) {
-                            for (const node of m.addedNodes) {
-                                if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) {
-                                    const txt = (node.textContent || "").trim();
-                                    if (txt.length > 2) {
-                                        let spk = "Participant";
-                                        const parent = node.parentElement ? node.parentElement.closest('div[jscontroller="D1tHje"]') : null;
-                                        if (parent) {
-                                            const header = parent.querySelector('div.zs75Ib, div.jxFHg');
-                                            if (header) spk = header.textContent.trim();
-                                        }
-                                        if (window.aegisMutationBridge) {
-                                            window.aegisMutationBridge(spk, txt);
+                    await self.page.evaluate("""() => {
+                        const observer = new MutationObserver((mutations) => {
+                            for (const m of mutations) {
+                                for (const node of m.addedNodes) {
+                                    if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) {
+                                        const txt = (node.textContent || "").trim();
+                                        if (txt.length > 2) {
+                                            let spk = "Participant";
+                                            const parent = node.parentElement ? node.parentElement.closest('div[jscontroller="D1tHje"]') : null;
+                                            if (parent) {
+                                                const header = parent.querySelector('div.zs75Ib, div.jxFHg');
+                                                if (header) spk = header.textContent.trim();
+                                            }
+                                            if (window.aegisMutationBridge) {
+                                                window.aegisMutationBridge(spk, txt);
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                    });
-                    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-                }""")
-                logger.info("DOM MutationObserver successfully registered for real-time caption scraping.")
-            except Exception as e:
-                logger.warning(f"Could not register MutationObserver ({e}); relying on polling observer.")
-
-            while self._is_running and (time.time() - start_time < max_duration_sec):
-                try:
-                    # Query Google Meet caption elements
-                    caption_elements = await self.page.query_selector_all(
-                        'div[jsname="YSxPtf"], div.a4bIc, span.yg3OAc'
-                    )
-                    for el in caption_elements:
-                        text = (await el.inner_text()).strip()
-                        if text and text not in seen_texts:
-                            seen_texts.add(text)
-                            speaker = "Participant"
-                            parent = await el.evaluate_handle("el => el.closest('div[jscontroller=\"D1tHje\"]') || el.parentElement")
-                            if parent:
-                                speaker_el = await parent.as_element().query_selector('div.zs75Ib, div.jxFHg')
-                                if speaker_el:
-                                    speaker = (await speaker_el.inner_text()).strip()
-
-                            await self.send_intake_chunk(speaker, text)
+                        });
+                        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+                    }""")
+                    logger.info("DOM MutationObserver successfully registered for real-time caption scraping.")
                 except Exception as e:
-                    logger.debug(f"Caption polling interval: {e}")
+                    logger.warning(f"Could not register MutationObserver ({e}); relying on polling observer.")
 
-                await asyncio.sleep(1.0)
+                while self._is_running and (time.time() - start_time < max_duration_sec):
+                    try:
+                        caption_elements = await self.page.query_selector_all(
+                            'div[jsname="YSxPtf"], div.a4bIc, span.yg3OAc'
+                        )
+                        for el in caption_elements:
+                            text = (await el.inner_text()).strip()
+                            if text and text not in seen_texts:
+                                seen_texts.add(text)
+                                speaker = "Participant"
+                                parent = await el.evaluate_handle("el => el.closest('div[jscontroller=\"D1tHje\"]') || el.parentElement")
+                                if parent:
+                                    speaker_el = await parent.as_element().query_selector('div.zs75Ib, div.jxFHg')
+                                    if speaker_el:
+                                        speaker = (await speaker_el.inner_text()).strip()
 
-            # Cleanup and trigger processing
-            logger.info("Meeting monitoring completed.")
-            await self.trigger_final_processing()
-            if self.context:
-                await self.context.close()
-            elif self.browser:
-                await self.browser.close()
+                                await self.send_intake_chunk(speaker, text)
+                    except Exception as e:
+                        logger.debug(f"Caption polling interval: {e}")
+
+                    await asyncio.sleep(1.0)
+
+                # Finalize
+                logger.info("Meeting monitoring completed.")
+                await self.trigger_final_processing()
+                if self.context:
+                    await self.context.close()
+                elif self.browser:
+                    await self.browser.close()
+
+        finally:
+            # Terminate native Chrome process if spawned
+            if self.chrome_proc:
+                try:
+                    self.chrome_proc.terminate()
+                    self.chrome_proc.wait(timeout=3)
+                except Exception:
+                    self.chrome_proc.kill()
+                self.chrome_proc = None
+            cleanup_profile_locks(profile_dir)
 
 
-async def login_flow():
-    """Opens a visible browser window for one-time Google Account sign-in."""
+def login_flow():
+    """Opens a native Chrome window for one-time Google Account sign-in."""
     profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_profile")
     os.makedirs(profile_dir, exist_ok=True)
     cleanup_profile_locks(profile_dir)
 
-    mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    if os.path.exists(mac_chrome):
-        logger.info(
-            "\n" + "=" * 80 + "\n"
-            "🌐 [OPENING GOOGLE CHROME FOR SIGN-IN]\n"
-            "A Google Chrome window is opening on your desktop.\n"
-            "1. Sign into your Google account in that Chrome window.\n"
-            "2. Once signed in, simply CLOSE the Chrome window.\n"
-            "Your authenticated session will be saved for the bot.\n"
-            + "=" * 80 + "\n"
-        )
-        try:
-            subprocess.run([
-                "open", "-n", "-W", "-a", "Google Chrome",
-                "--args",
-                f"--user-data-dir={profile_dir}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "https://accounts.google.com/signin",
-            ])
-            cleanup_profile_locks(profile_dir)
-            logger.info("✅ Google session successfully saved to .bot_profile!")
-            return
-        except Exception as e:
-            logger.warning(f"Native Chrome launch encountered ({e}); falling back to Playwright...")
+    chrome_bin = get_native_chrome_path()
+    if not chrome_bin:
+        print("Google Chrome not found at standard paths. Please install Google Chrome.")
+        return
 
-    logger.info("Opening visible browser via Playwright. Sign into your Google account...")
-    async with async_playwright() as p:
-        login_args = [
-            "--use-fake-ui-for-media-stream",
-            "--use-fake-device-for-media-stream",
-            "--disable-blink-features=AutomationControlled",
+    print("\n" + "=" * 80)
+    print("🌐 [OPENING GOOGLE CHROME FOR ONE-TIME SIGN-IN]")
+    print("A Google Chrome window is opening on your desktop.")
+    print("1. Sign into your Google account in that window.")
+    print("2. Once signed in, simply CLOSE the Chrome window.")
+    print("Your authenticated session will be saved for the bot.")
+    print("=" * 80 + "\n")
+
+    try:
+        subprocess.run([
+            chrome_bin,
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
             "--lang=en-US",
-        ]
-        try:
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=profile_dir,
-                headless=False,
-                channel="chrome",
-                args=login_args,
-                permissions=["microphone", "camera"],
-                locale="en-US",
-            )
-        except Exception:
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=profile_dir,
-                headless=False,
-                args=login_args,
-                permissions=["microphone", "camera"],
-                locale="en-US",
-            )
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.goto("https://accounts.google.com/signin")
-        logger.info("Browser open. Please sign in, then close the browser window.")
-        try:
-            while len(context.pages) > 0 and not page.is_closed():
-                await asyncio.sleep(2)
-        except Exception:
-            pass
+            "https://accounts.google.com/signin",
+        ])
         cleanup_profile_locks(profile_dir)
-        logger.info("✅ Login session successfully saved to .bot_profile!")
+        print("✅ Google session successfully saved to .bot_profile!")
+    except Exception as e:
+        print(f"Failed to open Google Chrome: {e}")
 
 
 async def run_live_bot(
@@ -498,7 +544,7 @@ async def main():
     args = parser.parse_args()
 
     if args.login:
-        await login_flow()
+        login_flow()
         return
 
     is_headless = args.headless and not args.headful
@@ -519,4 +565,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

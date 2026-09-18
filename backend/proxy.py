@@ -865,6 +865,36 @@ def aegis_meet_script_endpoint():
     return Response(content=js_content, media_type="application/javascript")
 
 
+@app.post("/login")
+@app.post("/api/login")
+async def bot_login_endpoint():
+    """
+    Opens native Google Chrome for one-time Google Sign-In into the bot profile.
+    """
+    from bot import get_native_chrome_path, cleanup_profile_locks
+    profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+    cleanup_profile_locks(profile_dir)
+
+    chrome_bin = get_native_chrome_path()
+    if not chrome_bin:
+        raise HTTPException(status_code=500, detail="Google Chrome binary not found.")
+
+    import subprocess
+    subprocess.Popen([
+        chrome_bin,
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--lang=en-US",
+        "https://accounts.google.com/signin",
+    ])
+    return {
+        "status": "opened",
+        "message": "Google Chrome opened for bot sign-in. Please sign in and close the window.",
+    }
+
+
 @app.post("/join")
 @app.post("/api/join")
 async def join_meeting_endpoint(payload: JoinMeetingPayload):
