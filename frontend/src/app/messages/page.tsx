@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
-import { getCurrentUser, AuthUser } from "@/lib/api";
+import { getCurrentUser, AuthUser, fetchMessages, sendChatMessage } from "@/lib/api";
 import {
   Mail,
   Send,
@@ -195,17 +195,49 @@ export default function MessagesPage() {
   useEffect(() => {
     const user = getCurrentUser();
     setCurrentUser(user);
+  }, []);
 
-    // Load persisted chat state from localStorage
-    const saved = localStorage.getItem("aegis_messages_store");
-    if (saved) {
+  // Poll backend for fresh channel messages every 3 seconds so other deployed users' messages appear live
+  useEffect(() => {
+    let isMounted = true;
+
+    async function syncChannelMessages() {
       try {
-        setChannels(JSON.parse(saved));
+        const serverMsgs = await fetchMessages(activeChannelId);
+        if (!isMounted || !serverMsgs || serverMsgs.length === 0) return;
+
+        const mapped: Message[] = serverMsgs.map((sm) => {
+          const senderLower = (sm.sender_name || "").toLowerCase();
+          const userLower = (currentUser?.canonical_name || currentUser?.name || "").toLowerCase();
+          const isSelf = userLower ? senderLower === userLower : false;
+          return {
+            id: String(sm.id),
+            sender: sm.sender_name,
+            senderRole: sm.sender_role || undefined,
+            text: sm.text,
+            timestamp: sm.created_at,
+            isSelf,
+            isBot: sm.sender_name === "AegisBot",
+          };
+        });
+
+        setChannels((prev) =>
+          prev.map((c) =>
+            c.id === activeChannelId ? { ...c, initialMessages: mapped } : c
+          )
+        );
       } catch {
-        // use default
+        // quiet fallback
       }
     }
-  }, []);
+
+    syncChannelMessages();
+    const interval = setInterval(syncChannelMessages, 3000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [activeChannelId, currentUser]);
 
   const activeChannel =
     channels.find((c) => c.id === activeChannelId) || channels[0];
@@ -214,63 +246,63 @@ export default function MessagesPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [activeChannel.initialMessages]);
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!messageText.trim() || !currentUser) return;
+    if (!messageText.trim()) return;
 
-    const newMsg: Message = {
+    const currentText = messageText.trim();
+    setMessageText("");
+
+    const senderName = currentUser?.canonical_name || currentUser?.name || "Team Member";
+    const senderRole = currentUser?.role === "admin" ? "Admin" : "Team Member";
+
+    // Optimistic local UI update
+    const optimisticMsg: Message = {
       id: `msg_${Date.now()}`,
-      sender: currentUser.canonical_name || currentUser.name || "Me",
-      senderRole: currentUser.role === "admin" ? "Admin" : "Team Member",
-      text: messageText.trim(),
+      sender: senderName,
+      senderRole: senderRole,
+      text: currentText,
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       isSelf: true,
     };
 
-    const updatedChannels = channels.map((c) => {
-      if (c.id === activeChannelId) {
-        return {
-          ...c,
-          initialMessages: [...c.initialMessages, newMsg],
-        };
-      }
-      return c;
-    });
+    setChannels((prev) =>
+      prev.map((c) =>
+        c.id === activeChannelId
+          ? { ...c, initialMessages: [...c.initialMessages, optimisticMsg] }
+          : c
+      )
+    );
 
-    setChannels(updatedChannels);
-    setMessageText("");
     try {
-      localStorage.setItem("aegis_messages_store", JSON.stringify(updatedChannels));
-    } catch {
-      // quiet
-    }
+      // Persist directly to backend SQLite so all other users on deployed frontends see it!
+      const res = await sendChatMessage({
+        channel_id: activeChannelId,
+        text: currentText,
+        sender_name: senderName,
+        sender_role: senderRole,
+      });
 
-    // Auto-reply simulation for AegisBot or meeting briefs channel
-    if (activeChannelId === "dm-aegisbot" || activeChannelId === "meeting-briefs") {
-      setTimeout(() => {
+      if (res?.bot_reply) {
         const botReply: Message = {
-          id: `bot_${Date.now()}`,
+          id: `bot_${res.bot_reply.id}`,
           sender: "AegisBot",
           senderRole: "Air-Gapped AI Assistant",
-          text: `🛡️ [Zero-Leak Acknowledged] Message received and indexed. Your action items are protected by the air-gapped cryptographic boundary.`,
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          text: res.bot_reply.text,
+          timestamp: res.bot_reply.created_at,
           isSelf: false,
           isBot: true,
         };
-
-        setChannels((prev) => {
-          const next = prev.map((c) => {
-            if (c.id === activeChannelId) {
-              return { ...c, initialMessages: [...c.initialMessages, botReply] };
-            }
-            return c;
-          });
-          try {
-            localStorage.setItem("aegis_messages_store", JSON.stringify(next));
-          } catch {}
-          return next;
-        });
-      }, 800);
+        setChannels((prev) =>
+          prev.map((c) =>
+            c.id === activeChannelId
+              ? { ...c, initialMessages: [...c.initialMessages, botReply] }
+              : c
+          )
+        );
+      }
+    } catch (err) {
+      console.error("Failed to send message to backend:", err);
     }
   };
 

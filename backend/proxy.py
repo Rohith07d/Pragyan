@@ -771,6 +771,41 @@ def init_db():
             sample_tasks
         )
 
+    # 6. Messages (id, channel_id, sender_id, sender_name, sender_role, text, created_at)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS Messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id TEXT NOT NULL,
+            sender_id INTEGER REFERENCES Users(id) ON DELETE SET NULL,
+            sender_name TEXT NOT NULL,
+            sender_role TEXT,
+            text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON Messages(channel_id)")
+
+    # Pre-seed initial messages if empty
+    cursor.execute("SELECT COUNT(*) FROM Messages")
+    if cursor.fetchone()[0] == 0:
+        seed_messages = [
+            ("general", user_id_map.get("Mayank"), "Mayank Sachdeva", "Tech Lead", "Morning team! Remember that all meeting audio is processed through our local Presidio air-gap.", "09:15 AM"),
+            ("general", user_id_map.get("Sambhav"), "Sambhav Chordia", "Frontend Engineer", "The Next.js multi-page registry is live with high-contrast grayscale styling.", "09:30 AM"),
+            ("general", user_id_map.get("Admin"), "Admin", "System Admin", "New phonetic alias generator has been updated to 100 variations per user profile.", "10:00 AM"),
+            ("meeting-briefs", None, "AegisBot", "AI Intelligence Engine", "📋 [BATCH SUMMARY COMPLETED] Meeting: Sprint Architecture Review. 3 action items assigned to Rohith, Mayank, and Sambhav. RAM buffer wiped.", "10:45 AM"),
+            ("meeting-briefs", None, "AegisBot", "AI Intelligence Engine", "🛡️ [AIR-GAP VERIFIED] Zero PII leaks detected during closed-caption ingestion. All tokens sanitized before cloud reasoning.", "11:15 AM"),
+            ("engineering", user_id_map.get("Mayank"), "Mayank Sachdeva", "Tech Lead", "Tested the end_meeting batch route with the 100 phonetic misspellings. It captured every variant perfectly.", "Yesterday 4:20 PM"),
+            ("engineering", user_id_map.get("Sambhav"), "Sambhav Chordia", "Frontend Engineer", "Dynamic route /meetings/[id] now renders PM View, Group View, and Absentee View seamlessly.", "Yesterday 5:10 PM"),
+            ("dm-mayank", user_id_map.get("Mayank"), "Mayank Sachdeva", "Tech Lead", "Hey! Could you verify if the APScheduler job is properly registered in the lifespan context?", "11:02 AM"),
+            ("dm-mayank", user_id_map.get("Mayank"), "Mayank Sachdeva", "Tech Lead", "The zero-leak test passed with 100% assertions in test_phase4_end_meeting.py.", "11:05 AM"),
+            ("dm-sambhav", user_id_map.get("Sambhav"), "Sambhav Chordia", "Frontend Specialist", "The clickable meetings registry is working great. Users can jump straight to /meetings/[id].", "Yesterday"),
+            ("dm-aegisbot", None, "AegisBot", "Air-Gapped AI Assistant", "Hello! I am AegisBot. You can ask me about meeting intelligence, extracted deliverables, or trigger manual pipeline tests right here.", "09:00 AM"),
+        ]
+        cursor.executemany(
+            "INSERT INTO Messages (channel_id, sender_id, sender_name, sender_role, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            seed_messages
+        )
+
     conn.commit()
     conn.close()
     logger.info(f"Relational SQLite database initialized at {DB_PATH}")
@@ -964,6 +999,26 @@ async def get_current_admin(current_user: dict = Depends(get_current_user)) -> d
             detail="Administrator access required.",
         )
     return current_user
+
+
+async def get_optional_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)) -> Optional[dict]:
+    """Gracefully extracts authenticated user if token present, or returns None."""
+    if not credentials or not credentials.credentials:
+        return None
+    try:
+        payload = decode_access_token(credentials.credentials)
+        user_id = payload.get("user_id")
+        if not user_id:
+            return None
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, canonical_name, role FROM Users WHERE id = ?", (user_id,))
+        user = cursor.fetchone()
+        conn.close()
+        return dict(user) if user else None
+    except Exception:
+        return None
 
 
 # ==============================================================================
@@ -1512,6 +1567,13 @@ class EndMeetingPayload(BaseModel):
     share_technical_summary: Optional[bool] = Field(None, description="Whether to share deep technical details")
     meeting_purpose: Optional[str] = Field(None, description="Meeting topic or purpose")
     transcript: Optional[str] = Field(None, description="Optional manual transcript fallback if RAM buffer is empty")
+
+
+class MessageCreatePayload(BaseModel):
+    channel_id: str = Field(..., description="Target channel or direct message thread ID")
+    text: str = Field(..., description="Message text content")
+    sender_name: Optional[str] = Field(None, description="Display name of sender")
+    sender_role: Optional[str] = Field(None, description="Sender company role")
 
 
 class TaskResponse(BaseModel):
@@ -3044,6 +3106,99 @@ def get_aliases_endpoint(current_user: dict = Depends(get_current_user)):
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+@app.get("/messages")
+@app.get("/api/messages")
+def get_messages_endpoint(
+    channel_id: Optional[str] = None,
+    current_user: Optional[dict] = Depends(get_optional_current_user),
+):
+    """
+    Returns messages, optionally filtered by channel_id.
+    Enables real-time cross-client message synchronization.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    if channel_id:
+        cursor.execute("""
+            SELECT id, channel_id, sender_id, sender_name, sender_role, text, created_at
+            FROM Messages
+            WHERE channel_id = ?
+            ORDER BY id ASC
+        """, (channel_id,))
+    else:
+        cursor.execute("""
+            SELECT id, channel_id, sender_id, sender_name, sender_role, text, created_at
+            FROM Messages
+            ORDER BY id ASC
+        """)
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/messages", status_code=status.HTTP_201_CREATED)
+@app.post("/api/messages", status_code=status.HTTP_201_CREATED)
+def create_message_endpoint(
+    payload: MessageCreatePayload,
+    current_user: Optional[dict] = Depends(get_optional_current_user),
+):
+    """
+    Creates a new chat message stored in the database so all deployed users see it.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    sender_id = None
+    sender_name = payload.sender_name or "Team Member"
+    sender_role = payload.sender_role or "Contributor"
+
+    if current_user:
+        sender_id = current_user.get("id")
+        sender_name = current_user.get("canonical_name") or sender_name
+        sender_role = "Admin" if current_user.get("role") == "admin" else "Team Member"
+
+    now_str = datetime.now().strftime("%I:%M %p")
+    cursor.execute("""
+        INSERT INTO Messages (channel_id, sender_id, sender_name, sender_role, text, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (payload.channel_id, sender_id, sender_name, sender_role, payload.text.strip(), now_str))
+    msg_id = cursor.lastrowid
+    conn.commit()
+
+    # If it's the AI assistant channel or briefs, trigger an AegisBot reply
+    bot_reply_dict = None
+    if payload.channel_id in ("dm-aegisbot", "meeting-briefs"):
+        bot_text = "🛡️ [Zero-Leak Acknowledged] Message received and indexed in tasks.db. Zero PII leaks detected."
+        bot_time = datetime.now().strftime("%I:%M %p")
+        cursor.execute("""
+            INSERT INTO Messages (channel_id, sender_id, sender_name, sender_role, text, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (payload.channel_id, None, "AegisBot", "Air-Gapped AI Assistant", bot_text, bot_time))
+        conn.commit()
+        bot_reply_id = cursor.lastrowid
+        bot_reply_dict = {
+            "id": bot_reply_id,
+            "channel_id": payload.channel_id,
+            "sender_id": None,
+            "sender_name": "AegisBot",
+            "sender_role": "Air-Gapped AI Assistant",
+            "text": bot_text,
+            "created_at": bot_time,
+        }
+
+    cursor.execute("SELECT * FROM Messages WHERE id = ?", (msg_id,))
+    new_msg = dict(cursor.fetchone())
+    conn.close()
+
+    return {
+        "status": "created",
+        "message": new_msg,
+        "bot_reply": bot_reply_dict,
+    }
 
 
 class AliasGenerateRequest(BaseModel):

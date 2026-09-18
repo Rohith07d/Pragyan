@@ -299,3 +299,34 @@ export async function fetchUsers(): Promise<AuthUser[]> {
     return [];
   }
 }
+
+export interface BackendMessage {
+  id: number;
+  channel_id: string;
+  sender_id?: number | null;
+  sender_name: string;
+  sender_role?: string;
+  text: string;
+  created_at: string;
+}
+
+export async function fetchMessages(channelId?: string): Promise<BackendMessage[]> {
+  try {
+    const params = channelId ? { channel_id: channelId } : {};
+    const res = await api.get("/api/messages", { params });
+    return res.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function sendChatMessage(payload: {
+  channel_id: string;
+  text: string;
+  sender_name?: string;
+  sender_role?: string;
+}): Promise<{ status: string; message: BackendMessage; bot_reply?: BackendMessage | null }> {
+  const res = await api.post("/api/messages", payload);
+  return res.data;
+}
+
