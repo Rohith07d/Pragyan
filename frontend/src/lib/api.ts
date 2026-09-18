@@ -333,3 +333,9 @@ export async function sendChatMessage(payload: {
   return res.data;
 }
 
+export async function clearChatMessages(channelId?: string): Promise<{ status: string }> {
+  const params = channelId ? { channel_id: channelId } : {};
+  const res = await api.delete("/api/messages", { params });
+  return res.data;
+}
+

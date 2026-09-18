@@ -3209,6 +3209,24 @@ def create_message_endpoint(
     }
 
 
+@app.delete("/messages")
+@app.delete("/api/messages")
+def clear_messages_endpoint(channel_id: Optional[str] = None):
+    """
+    Clears messages from the database.
+    If channel_id is provided, clears only that channel. Otherwise, clears all messages.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    cursor = conn.cursor()
+    if channel_id:
+        cursor.execute("DELETE FROM Messages WHERE channel_id = ?", (channel_id,))
+    else:
+        cursor.execute("DELETE FROM Messages")
+    conn.commit()
+    conn.close()
+    return {"status": "cleared", "channel_id": channel_id}
+
+
 class AliasGenerateRequest(BaseModel):
     canonical_name: str
 

@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
-import { getCurrentUser, AuthUser, fetchMessages, sendChatMessage } from "@/lib/api";
+import { getCurrentUser, AuthUser, fetchMessages, sendChatMessage, clearChatMessages } from "@/lib/api";
 import {
   Mail,
   Send,
@@ -19,6 +19,7 @@ import {
   Smile,
   MoreVertical,
   CheckCheck,
+  Trash2,
 } from "lucide-react";
 
 interface Message {
@@ -45,143 +46,46 @@ const DEFAULT_CHANNELS: Channel[] = [
     id: "general",
     name: "general",
     type: "channel",
-    unread: 4,
-    initialMessages: [
-      {
-        id: "g1",
-        sender: "Mayank Sachdeva",
-        senderRole: "Tech Lead",
-        text: "Morning team! Remember that all meeting audio is processed through our local Presidio air-gap.",
-        timestamp: "09:15 AM",
-        isSelf: false,
-      },
-      {
-        id: "g2",
-        sender: "Sambhav Chordia",
-        senderRole: "Frontend Engineer",
-        text: "The Next.js multi-page registry is live with high-contrast grayscale styling.",
-        timestamp: "09:30 AM",
-        isSelf: false,
-      },
-      {
-        id: "g3",
-        sender: "Admin",
-        senderRole: "System Admin",
-        text: "New phonetic alias generator has been updated to 100 variations per user profile.",
-        timestamp: "10:00 AM",
-        isSelf: false,
-      },
-    ],
+    unread: 0,
+    initialMessages: [],
   },
   {
     id: "meeting-briefs",
     name: "meeting-briefs",
     type: "channel",
-    unread: 12,
-    initialMessages: [
-      {
-        id: "mb1",
-        sender: "AegisBot",
-        senderRole: "AI Intelligence Engine",
-        text: "📋 [BATCH SUMMARY COMPLETED] Meeting: Sprint Architecture Review. 3 action items assigned to Rohith, Mayank, and Sambhav. RAM buffer wiped.",
-        timestamp: "10:45 AM",
-        isSelf: false,
-        isBot: true,
-      },
-      {
-        id: "mb2",
-        sender: "AegisBot",
-        senderRole: "AI Intelligence Engine",
-        text: "🛡️ [AIR-GAP VERIFIED] Zero PII leaks detected during closed-caption ingestion. All tokens sanitized before cloud reasoning.",
-        timestamp: "11:15 AM",
-        isSelf: false,
-        isBot: true,
-      },
-    ],
+    unread: 0,
+    initialMessages: [],
   },
   {
     id: "engineering",
     name: "engineering-zero-leak",
     type: "channel",
-    unread: 8,
-    initialMessages: [
-      {
-        id: "e1",
-        sender: "Mayank Sachdeva",
-        senderRole: "Tech Lead",
-        text: "Tested the end_meeting batch route with the 100 phonetic misspellings. It captured every variant perfectly.",
-        timestamp: "Yesterday 4:20 PM",
-        isSelf: false,
-      },
-      {
-        id: "e2",
-        sender: "Sambhav Chordia",
-        senderRole: "Frontend Engineer",
-        text: "Dynamic route /meetings/[id] now renders PM View, Group View, and Absentee View seamlessly.",
-        timestamp: "Yesterday 5:10 PM",
-        isSelf: false,
-      },
-    ],
+    unread: 0,
+    initialMessages: [],
   },
   {
     id: "dm-mayank",
     name: "Mayank Sachdeva",
     type: "dm",
-    unread: 3,
+    unread: 0,
     role: "Tech Lead",
-    initialMessages: [
-      {
-        id: "dm1",
-        sender: "Mayank Sachdeva",
-        senderRole: "Tech Lead",
-        text: "Hey! Could you verify if the APScheduler job is properly registered in the lifespan context?",
-        timestamp: "11:02 AM",
-        isSelf: false,
-      },
-      {
-        id: "dm2",
-        sender: "Mayank Sachdeva",
-        senderRole: "Tech Lead",
-        text: "The zero-leak test passed with 100% assertions in test_phase4_end_meeting.py.",
-        timestamp: "11:05 AM",
-        isSelf: false,
-      },
-    ],
+    initialMessages: [],
   },
   {
     id: "dm-sambhav",
     name: "Sambhav Chordia",
     type: "dm",
-    unread: 2,
+    unread: 0,
     role: "Frontend Specialist",
-    initialMessages: [
-      {
-        id: "ds1",
-        sender: "Sambhav Chordia",
-        senderRole: "Frontend Specialist",
-        text: "The clickable meetings registry is working great. Users can jump straight to /meetings/[id].",
-        timestamp: "Yesterday",
-        isSelf: false,
-      },
-    ],
+    initialMessages: [],
   },
   {
     id: "dm-aegisbot",
     name: "AegisBot Assistant",
     type: "dm",
-    unread: 5,
+    unread: 0,
     role: "Air-Gapped AI Assistant",
-    initialMessages: [
-      {
-        id: "da1",
-        sender: "AegisBot",
-        senderRole: "Air-Gapped AI Assistant",
-        text: "Hello! I am AegisBot. You can ask me about meeting intelligence, extracted deliverables, or trigger manual pipeline tests right here.",
-        timestamp: "09:00 AM",
-        isSelf: false,
-        isBot: true,
-      },
-    ],
+    initialMessages: [],
   },
 ];
 
@@ -192,6 +96,29 @@ export default function MessagesPage() {
   const [messageText, setMessageText] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef<boolean>(true);
+
+  const handleScroll = () => {
+    if (!scrollContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
+    // Consider at bottom if within 80px of bottom
+    isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 80;
+  };
+
+  const handleClearHistory = async () => {
+    try {
+      await clearChatMessages(activeChannelId);
+      setChannels((prev) =>
+        prev.map((c) =>
+          c.id === activeChannelId ? { ...c, initialMessages: [], unread: 0 } : c
+        )
+      );
+      isAtBottomRef.current = true;
+    } catch (err) {
+      console.error("Failed to clear chat:", err);
+    }
+  };
 
   const markChannelAsRead = (channelId: string) => {
     setChannels((prev) =>
@@ -260,9 +187,9 @@ export default function MessagesPage() {
     async function syncChannelMessages() {
       try {
         const serverMsgs = await fetchMessages(activeChannelId);
-        if (!isMounted || !serverMsgs || serverMsgs.length === 0) return;
+        if (!isMounted) return;
 
-        const mapped: Message[] = serverMsgs.map((sm) => {
+        const mapped: Message[] = (serverMsgs || []).map((sm) => {
           const senderLower = (sm.sender_name || "").toLowerCase();
           const userLower = (currentUser?.canonical_name || currentUser?.name || "").toLowerCase();
           const isSelf = userLower ? senderLower === userLower : false;
@@ -278,9 +205,17 @@ export default function MessagesPage() {
         });
 
         setChannels((prev) =>
-          prev.map((c) =>
-            c.id === activeChannelId ? { ...c, initialMessages: mapped } : c
-          )
+          prev.map((c) => {
+            if (c.id !== activeChannelId) return c;
+            // Prevent re-rendering and auto-scroll if message list has not changed!
+            const isIdentical =
+              c.initialMessages.length === mapped.length &&
+              c.initialMessages.every(
+                (m, idx) => m.id === mapped[idx].id && m.text === mapped[idx].text
+              );
+            if (isIdentical) return c;
+            return { ...c, initialMessages: mapped };
+          })
         );
       } catch {
         // quiet fallback
@@ -298,8 +233,21 @@ export default function MessagesPage() {
   const activeChannel =
     channels.find((c) => c.id === activeChannelId) || channels[0];
 
+  // Scroll to bottom on channel switch
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    isAtBottomRef.current = true;
+    setTimeout(() => {
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+      }
+    }, 50);
+  }, [activeChannelId]);
+
+  // Only scroll down when new messages arrive IF user was already at the bottom
+  useEffect(() => {
+    if (isAtBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [activeChannel.initialMessages]);
 
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -329,6 +277,11 @@ export default function MessagesPage() {
           : c
       )
     );
+
+    isAtBottomRef.current = true;
+    setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 40);
 
     try {
       // Persist directly to backend SQLite so all other users on deployed frontends see it!
@@ -533,14 +486,29 @@ export default function MessagesPage() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 text-xs text-zinc-400">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-                  <span className="text-[11px]">Connected</span>
+                <div className="flex items-center gap-3 text-xs text-zinc-400">
+                  <button
+                    type="button"
+                    onClick={handleClearHistory}
+                    title="Clear messages in this channel"
+                    className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-red-400 border border-zinc-700/60 transition-colors"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>Clear Chat</span>
+                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                    <span className="text-[11px]">Connected</span>
+                  </div>
                 </div>
               </div>
 
               {/* Message Stream */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              <div
+                ref={scrollContainerRef}
+                onScroll={handleScroll}
+                className="flex-1 overflow-y-auto p-6 space-y-4"
+              >
                 {filteredMessages.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center text-zinc-500 space-y-2">
                     <Mail className="w-8 h-8 text-zinc-600 stroke-[1.5]" />
