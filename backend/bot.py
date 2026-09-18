@@ -303,6 +303,27 @@ class AegisMeetBot:
             await self.browser.close()
 
 
+async def run_live_bot(
+    meet_url: str,
+    duration_sec: int = 180,
+    bot_name: str = "AegisMeet Notetaker",
+    proxy_url: str = DEFAULT_PROXY_URL,
+    headless: bool = True,
+) -> Optional[Dict]:
+    """
+    Entrypoint invoked by FastAPI proxy scheduler (APScheduler) or ad-hoc /join endpoint.
+    """
+    bot = AegisMeetBot(
+        meeting_url=meet_url,
+        bot_name=bot_name,
+        proxy_url=proxy_url,
+        headless=headless,
+    )
+    if not meet_url or meet_url.lower() in ("simulate", "mock", "test"):
+        return await bot.run_simulation()
+    return await bot.join_google_meet(max_duration_sec=duration_sec)
+
+
 async def main():
     parser = argparse.ArgumentParser(description="AegisMeet Intake Agent (Playwright Bot)")
     parser.add_argument("--url", type=str, help="Google Meet URL to join")
@@ -330,3 +351,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

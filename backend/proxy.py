@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -496,13 +497,20 @@ async def dispatch_webhooks(rehydrated_data: Dict[str, Any]):
 
 
 # ==============================================================================
-# FastAPI Application & Lifespan
+# FastAPI Application & Lifespan with APScheduler
 # ==============================================================================
+scheduler = AsyncIOScheduler()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     wipe_ephemeral_ram()
+    scheduler.start()
+    logger.info("APScheduler AsyncIOScheduler started successfully.")
     yield
+    scheduler.shutdown()
+    logger.info("APScheduler AsyncIOScheduler shut down.")
     wipe_ephemeral_ram()
 
 
@@ -536,6 +544,19 @@ class IntakePayload(BaseModel):
     meeting_id: Optional[str] = "default"
 
 
+class JoinMeetingPayload(BaseModel):
+    meet_url: str = Field(..., description="Google Meet URL to join")
+    bot_name: Optional[str] = "AegisMeet Notetaker"
+    duration_sec: Optional[int] = 180
+
+
+class ScheduleMeetingPayload(BaseModel):
+    meet_url: str = Field(..., description="Google Meet URL to join")
+    join_time: str = Field(..., description="ISO 8601 datetime string for scheduled join")
+    bot_name: Optional[str] = "AegisMeet Notetaker"
+    duration_sec: Optional[int] = 180
+
+
 class TaskResponse(BaseModel):
     id: int
     task: str
@@ -543,6 +564,16 @@ class TaskResponse(BaseModel):
     deadline: Optional[str]
     status: str
     created_at: str
+
+
+async def _execute_bot_session(meet_url: str, bot_name: str = "AegisMeet Notetaker", duration_sec: int = 180):
+    """Triggers the Playwright bot headlessly."""
+    logger.info(f"Triggering Playwright bot session for: {meet_url}")
+    try:
+        from bot import run_live_bot
+        await run_live_bot(meet_url=meet_url, bot_name=bot_name, duration_sec=duration_sec)
+    except Exception as e:
+        logger.error(f"Error during Playwright bot session ({meet_url}): {e}")
 
 
 # ==============================================================================
@@ -555,8 +586,73 @@ def health_check():
         "service": "AegisMeet Privacy Proxy",
         "presidio_model": "en_core_web_lg",
         "featherless_model": FEATHERLESS_MODEL,
+        "scheduler_running": scheduler.running,
         "ephemeral_tokens_in_ram": len(_EPHEMERAL_PII_RAM),
     }
+
+
+@app.post("/join")
+@app.post("/api/join")
+async def join_meeting_endpoint(payload: JoinMeetingPayload, background_tasks: BackgroundTasks):
+    """
+    Instant, ad-hoc meeting join trigger for live testing.
+    Dispatches Playwright bot headlessly with permissions bypassed.
+    """
+    logger.info(f"Received instant join request for Google Meet: {payload.meet_url}")
+    background_tasks.add_task(_execute_bot_session, payload.meet_url, payload.bot_name, payload.duration_sec)
+    return {
+        "status": "launched",
+        "message": f"Playwright bot dispatched to {payload.meet_url}",
+        "meet_url": payload.meet_url,
+        "bot_name": payload.bot_name,
+    }
+
+
+@app.post("/schedule")
+@app.post("/api/schedule")
+async def schedule_meeting_endpoint(payload: ScheduleMeetingPayload):
+    """
+    Schedules the Playwright bot to join at a future ISO 8601 timestamp using APScheduler.
+    """
+    try:
+        clean_time = payload.join_time.replace("Z", "+00:00")
+        target_dt = datetime.fromisoformat(clean_time)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid join_time format ({e}). Expected ISO 8601 (e.g. 2026-09-18T19:30:00).",
+        )
+
+    job_id = f"meet_job_{int(datetime.now().timestamp())}_{abs(hash(payload.meet_url)) % 10000}"
+    scheduler.add_job(
+        _execute_bot_session,
+        trigger="date",
+        run_date=target_dt,
+        args=[payload.meet_url, payload.bot_name, payload.duration_sec],
+        id=job_id,
+        replace_existing=True,
+    )
+    logger.info(f"Scheduled job {job_id} for {payload.meet_url} at {target_dt.isoformat()}")
+
+    return {
+        "status": "scheduled",
+        "job_id": job_id,
+        "meet_url": payload.meet_url,
+        "run_date": target_dt.isoformat(),
+        "message": f"Bot successfully scheduled to join at {target_dt.isoformat()}",
+    }
+
+
+@app.post("/intake")
+@app.post("/api/intake")
+async def bot_intake_endpoint(payload: IntakePayload):
+    """
+    Intake endpoint called by the headless Playwright bot as captions stream in.
+    """
+    raw_caption = f"{payload.speaker}: {payload.caption}" if payload.speaker else payload.caption
+    preview_mask = mask_transcript(payload.caption)["masked_text"]
+    logger.info(f"[INTAKE STREAM] RAW: {raw_caption} | MASKED PREVIEW: {preview_mask}")
+    return {"status": "received", "length": len(payload.caption)}
 
 
 @app.post("/api/mask")
@@ -573,15 +669,6 @@ def mask_endpoint(payload: TranscriptPayload):
         "detected_entities": mask_res["entities_found"],
         "token_map": mask_res["token_map"],
     }
-
-
-@app.post("/api/intake")
-async def bot_intake_endpoint(payload: IntakePayload):
-    """
-    Intake endpoint called by the headless Playwright bot as captions stream in.
-    """
-    logger.info(f"Bot intake chunk received from [{payload.speaker or 'Unknown'}]: {payload.caption}")
-    return {"status": "received", "length": len(payload.caption)}
 
 
 @app.post("/api/process")

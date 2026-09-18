@@ -31,7 +31,7 @@ Ephemeral PII RAM Dictionary:
 {"[PERSON_1]": "Mayank Sachdeva", "[ORG_1]": "Acme Corp"}
 
 ## 2. Tech Stack & Frameworks
-*   **Backend (Proxy Engine):** Python 3, FastAPI, Uvicorn.
+*   **Backend (Proxy Engine):** Python 3, FastAPI, Uvicorn, apscheduler (AsyncIOScheduler for meeting bot scheduling).
 *   **Frontend (UI Dashboard):** Next.js (App Router), React, Tailwind CSS, Axios.
 *   **AI & NLP Pipeline:** Microsoft Presidio (Anonymizer/Analyzer), spaCy (`en_core_web_lg`), Featherless AI API.
 *   **Browser Automation:** Playwright.
@@ -39,8 +39,10 @@ Ephemeral PII RAM Dictionary:
 *   **External Integrations:** Discord/Slack Webhooks (Mocked enterprise communication).
 
 ## 3. API Routes & Networking
-*   `POST /api/intake`: Streams live meeting captions from Playwright intake scraper.
-*   `POST /api/process` (and alias `POST /api/summarize`): End-to-end zero-leak processing pipeline.
+*   `POST /join` & `POST /api/join`: Instant, ad-hoc trigger for Playwright bot to join Google Meet.
+*   `POST /schedule` & `POST /api/schedule`: Schedules Playwright bot to join at specified ISO 8601 `join_time` via AsyncIOScheduler.
+*   `POST /intake` & `POST /api/intake`: Streams live meeting captions from Playwright intake scraper (via DOM MutationObserver).
+*   `POST /summarize`, `POST /api/summarize`, & `POST /api/process`: Manual fallback transcript acceptance and full end-to-end zero-leak processing pipeline.
 *   `POST /api/mask`: Dedicated masking verification endpoint.
 *   `GET /api/tasks`: Read stored tokenized tasks from SQLite.
 *   `GET /api/audit-logs`: Real-time telemetry verifying zero PII leakage.

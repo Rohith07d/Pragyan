@@ -66,10 +66,35 @@ def test_audit_logs_and_webhook_feed():
     assert isinstance(webhook_data, list)
     assert len(webhook_data) > 0
 
+def test_schedule_and_join_endpoints():
+    # Test instant join endpoint
+    join_resp = client.post("/join", json={"meet_url": "simulate"})
+    assert join_resp.status_code == 200
+    assert join_resp.json()["status"] == "launched"
+
+    # Test future schedule endpoint
+    schedule_resp = client.post("/schedule", json={
+        "meet_url": "https://meet.google.com/xyz-abcd-efg",
+        "join_time": "2026-09-18T22:00:00"
+    })
+    assert schedule_resp.status_code == 200
+    assert schedule_resp.json()["status"] == "scheduled"
+    assert "job_id" in schedule_resp.json()
+
+    # Test intake endpoint
+    intake_resp = client.post("/intake", json={
+        "speaker": "Rohith",
+        "caption": "Testing intake caption stream"
+    })
+    assert intake_resp.status_code == 200
+    assert intake_resp.json()["status"] == "received"
+
 if __name__ == "__main__":
     test_health()
     test_mask_endpoint()
     test_process_pipeline_zero_leak_and_wipe()
     test_tasks_endpoint()
     test_audit_logs_and_webhook_feed()
-    print("All pipeline and telemetry tests passed!")
+    test_schedule_and_join_endpoints()
+    print("All pipeline, scheduling, and telemetry tests passed!")
+

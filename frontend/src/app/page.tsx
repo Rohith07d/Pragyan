@@ -25,6 +25,9 @@ import {
   Activity,
   ChevronDown,
   ChevronUp,
+  Video,
+  Calendar,
+  Play,
 } from "lucide-react";
 
 const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL || "http://localhost:8000";
@@ -113,6 +116,13 @@ export default function Dashboard() {
   const [showAuditLogs, setShowAuditLogs] = useState<boolean>(false);
   const [showWebhookFeed, setShowWebhookFeed] = useState<boolean>(false);
 
+  // Live Meeting Join & Scheduling State
+  const [meetUrl, setMeetUrl] = useState<string>("https://meet.google.com/xyz-abcd-efg");
+  const [joinTime, setJoinTime] = useState<string>("");
+  const [joinLoading, setJoinLoading] = useState<boolean>(false);
+  const [scheduleLoading, setScheduleLoading] = useState<boolean>(false);
+  const [schedulerNotice, setSchedulerNotice] = useState<{ message: string; type: "success" | "error" } | null>(null);
+
   // Health & Task Polling
   const checkHealth = async () => {
     try {
@@ -193,6 +203,66 @@ export default function Dashboard() {
       alert(`Pipeline execution failed: ${e.response?.data?.detail || e.message}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleJoinNow = async () => {
+    if (!meetUrl.trim()) {
+      alert("Please enter a valid Google Meet URL (e.g. https://meet.google.com/abc-defg-hij)");
+      return;
+    }
+    setJoinLoading(true);
+    setSchedulerNotice(null);
+    try {
+      const res = await axios.post(`${PROXY_URL}/join`, {
+        meet_url: meetUrl.trim(),
+        bot_name: "AegisMeet Notetaker",
+      });
+      setSchedulerNotice({
+        type: "success",
+        message: `🚀 Playwright Bot Dispatched! Connecting to ${meetUrl.trim()} with permissions bypassed...`,
+      });
+      setTimeout(() => setSchedulerNotice(null), 10000);
+    } catch (e: any) {
+      setSchedulerNotice({
+        type: "error",
+        message: `Join failed: ${e.response?.data?.detail || e.message}`,
+      });
+    } finally {
+      setJoinLoading(false);
+    }
+  };
+
+  const handleScheduleBot = async () => {
+    if (!meetUrl.trim()) {
+      alert("Please enter a Google Meet URL to schedule");
+      return;
+    }
+    if (!joinTime) {
+      alert("Please select a valid date and time");
+      return;
+    }
+    setScheduleLoading(true);
+    setSchedulerNotice(null);
+    try {
+      const isoTime = new Date(joinTime).toISOString();
+      const res = await axios.post(`${PROXY_URL}/schedule`, {
+        meet_url: meetUrl.trim(),
+        join_time: isoTime,
+        bot_name: "AegisMeet Notetaker",
+      });
+      setSchedulerNotice({
+        type: "success",
+        message: `⏰ Successfully Scheduled! Job ID: ${res.data.job_id} scheduled for ${new Date(joinTime).toLocaleString()}`,
+      });
+      setTimeout(() => setSchedulerNotice(null), 12000);
+    } catch (e: any) {
+      setSchedulerNotice({
+        type: "error",
+        message: `Scheduling failed: ${e.response?.data?.detail || e.message}`,
+      });
+    } finally {
+      setScheduleLoading(false);
     }
   };
 
@@ -317,16 +387,120 @@ export default function Dashboard() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-        {/* Controls & Meeting Transcript Input */}
+        {/* Step 3: Live Testing Harness & Google Meet Scheduler */}
+        <section className="bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl relative overflow-hidden">
+          <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 mb-5">
+            <div>
+              <div className="flex items-center space-x-2">
+                <span className="p-2 rounded-xl bg-indigo-600/20 text-indigo-400 border border-indigo-500/30">
+                  <Video className="w-5 h-5" />
+                </span>
+                <h2 className="text-lg font-semibold text-white tracking-tight">
+                  Live Testing Harness & Meeting Scheduler
+                </h2>
+                <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-cyan-950 border border-cyan-800 text-cyan-300">
+                  Playwright Bypass
+                </span>
+              </div>
+              <p className="text-sm text-slate-400 mt-1">
+                Launches Chromium with auto-accepted media streams (<code className="text-xs text-indigo-300 bg-slate-800 px-1 py-0.5 rounded">--use-fake-ui-for-media-stream</code>) and streams DOM captions via MutationObserver.
+              </p>
+            </div>
+          </div>
+
+          {/* Join and Schedule Inputs */}
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+            {/* Meet URL */}
+            <div className="md:col-span-6 space-y-1.5">
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
+                <Video className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Google Meet URL</span>
+              </label>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={meetUrl}
+                  onChange={(e) => setMeetUrl(e.target.value)}
+                  placeholder="https://meet.google.com/abc-defg-hij"
+                  className="w-full rounded-xl bg-slate-950 border border-slate-800 px-4 py-2.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+                />
+              </div>
+            </div>
+
+            {/* Join Now Primary Button */}
+            <div className="md:col-span-2">
+              <button
+                onClick={handleJoinNow}
+                disabled={joinLoading}
+                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white text-sm font-semibold shadow-lg shadow-indigo-600/30 flex items-center justify-center space-x-2 transition-all disabled:opacity-50"
+              >
+                {joinLoading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Joining...</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-4 h-4 fill-white" />
+                    <span>Join Now</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* DateTime Input */}
+            <div className="md:col-span-4 space-y-1.5">
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center space-x-1.5">
+                <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Schedule Bot (FastAPI APScheduler)</span>
+              </label>
+              <div className="flex space-x-2">
+                <input
+                  type="datetime-local"
+                  value={joinTime}
+                  onChange={(e) => setJoinTime(e.target.value)}
+                  className="w-full rounded-xl bg-slate-950 border border-slate-800 px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  onClick={handleScheduleBot}
+                  disabled={scheduleLoading}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-medium border border-cyan-800/60 flex items-center space-x-1.5 transition-all whitespace-nowrap disabled:opacity-50"
+                >
+                  {scheduleLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Clock className="w-3.5 h-3.5" />}
+                  <span>Schedule</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Status Alert Banner */}
+          {schedulerNotice && (
+            <div
+              className={`mt-4 p-3 rounded-xl border text-xs flex items-center space-x-2 transition-all ${
+                schedulerNotice.type === "success"
+                  ? "bg-emerald-950/70 border-emerald-700/60 text-emerald-300"
+                  : "bg-rose-950/70 border-rose-700/60 text-rose-300"
+              }`}
+            >
+              <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+              <span>{schedulerNotice.message}</span>
+            </div>
+          )}
+        </section>
+
+        {/* Temporary Fallback: Manual Transcript Pasting & Pipeline Execution */}
         <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl relative overflow-hidden">
           <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 mb-4">
             <div>
-              <h2 className="text-lg font-semibold text-white flex items-center space-x-2">
+              <div className="flex items-center space-x-2">
                 <FileText className="w-5 h-5 text-indigo-400" />
-                <span>Meeting Caption Intake & Stream</span>
-              </h2>
-              <p className="text-sm text-slate-400">
-                Input live caption transcripts or trigger the automated Playwright bot simulation.
+                <h2 className="text-lg font-semibold text-white">Emergency Fallback: Manual Transcript Intake</h2>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-amber-950 border border-amber-700 text-amber-300">
+                  Hackathon Safe Fallback
+                </span>
+              </div>
+              <p className="text-sm text-slate-400 mt-1">
+                Paste meeting text directly to execute the zero-leak pipeline if Google Meet DOM changes during the live demo.
               </p>
             </div>
 
