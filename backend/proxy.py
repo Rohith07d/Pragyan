@@ -16,6 +16,7 @@ import json
 import ast
 import sqlite3
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
@@ -548,14 +549,14 @@ class IntakePayload(BaseModel):
 class JoinMeetingPayload(BaseModel):
     meet_url: str = Field(..., description="Google Meet URL to join")
     bot_name: Optional[str] = "AegisMeet Notetaker"
-    duration_sec: Optional[int] = 180
+    duration_sec: Optional[int] = 3600
 
 
 class ScheduleMeetingPayload(BaseModel):
     meet_url: str = Field(..., description="Google Meet URL to join")
     join_time: str = Field(..., description="ISO 8601 datetime string for scheduled join")
     bot_name: Optional[str] = "AegisMeet Notetaker"
-    duration_sec: Optional[int] = 180
+    duration_sec: Optional[int] = 3600
 
 
 class TaskResponse(BaseModel):
@@ -567,16 +568,35 @@ class TaskResponse(BaseModel):
     created_at: str
 
 
-async def _execute_bot_session(meet_url: str, bot_name: str = "AegisMeet Notetaker", duration_sec: int = 180):
-    """Triggers the Playwright bot."""
-    logger.info(f"Triggering Playwright bot session for: {meet_url}")
+_ACTIVE_BOT_INSTANCE: Optional[Any] = None
+_LIVE_INTAKE_FEED: List[Dict[str, Any]] = []
+
+
+async def _execute_bot_session(meet_url: str, bot_name: str = "AegisMeet Notetaker", duration_sec: int = 3600):
+    """Triggers the Playwright bot with global session lifecycle tracking."""
+    global _ACTIVE_BOT_INSTANCE
+    logger.info(f"Triggering Playwright bot session for: {meet_url} (max duration: {duration_sec}s)")
     try:
-        from bot import run_live_bot
-        # Set headless=False so Chrome opens visibly on Mac desktop for live Google Meet calls
+        from bot import AegisMeetBot, run_live_bot
         is_mock = "mock-meet" in meet_url or meet_url.lower() in ("simulate", "test")
-        await run_live_bot(meet_url=meet_url, bot_name=bot_name, duration_sec=duration_sec, headless=is_mock)
+        bot = AegisMeetBot(
+            meeting_url=meet_url,
+            bot_name=bot_name,
+            proxy_url="http://localhost:8000",
+            headless=is_mock,
+        )
+        _ACTIVE_BOT_INSTANCE = bot
+        await run_live_bot(
+            meet_url=meet_url,
+            bot_name=bot_name,
+            duration_sec=duration_sec,
+            headless=is_mock,
+            bot_instance=bot,
+        )
     except Exception as e:
         logger.error(f"Error during Playwright bot session ({meet_url}): {e}")
+    finally:
+        _ACTIVE_BOT_INSTANCE = None
 
 
 # ==============================================================================
@@ -948,15 +968,70 @@ async def schedule_meeting_endpoint(payload: ScheduleMeetingPayload):
     }
 
 
+@app.get("/api/bot/status")
+def bot_status_endpoint():
+    """Returns real-time status of any active bot session."""
+    global _ACTIVE_BOT_INSTANCE
+    if _ACTIVE_BOT_INSTANCE and getattr(_ACTIVE_BOT_INSTANCE, "_is_running", False):
+        elapsed = 0
+        if _ACTIVE_BOT_INSTANCE.admitted_time:
+            elapsed = int(time.time() - _ACTIVE_BOT_INSTANCE.admitted_time)
+        return {
+            "active": True,
+            "meet_url": _ACTIVE_BOT_INSTANCE.meeting_url,
+            "bot_name": _ACTIVE_BOT_INSTANCE.bot_name,
+            "admitted": _ACTIVE_BOT_INSTANCE.is_admitted,
+            "captions_captured": len(_ACTIVE_BOT_INSTANCE.collected_chunks),
+            "duration_sec": elapsed,
+        }
+    return {
+        "active": False,
+        "meet_url": None,
+        "bot_name": None,
+        "admitted": False,
+        "captions_captured": 0,
+        "duration_sec": 0,
+    }
+
+
+@app.post("/api/bot/stop")
+@app.post("/api/bot/leave")
+async def stop_bot_endpoint():
+    """Commands the active bot to leave the meeting and finalize processing immediately."""
+    global _ACTIVE_BOT_INSTANCE
+    if not _ACTIVE_BOT_INSTANCE or not getattr(_ACTIVE_BOT_INSTANCE, "_is_running", False):
+        return {"status": "not_running", "message": "No active bot session is currently running."}
+    logger.info("Triggering stop signal on active AegisMeetBot instance.")
+    _ACTIVE_BOT_INSTANCE.stop()
+    return {"status": "stopping", "message": "Bot leaving call and finalizing zero-leak briefing..."}
+
+
+@app.get("/api/intake/feed")
+def intake_feed_endpoint(limit: int = 50):
+    """Returns the recent live intake caption stream with privacy masking preview."""
+    global _LIVE_INTAKE_FEED
+    return _LIVE_INTAKE_FEED[-limit:]
+
+
 @app.post("/intake")
 @app.post("/api/intake")
 async def bot_intake_endpoint(payload: IntakePayload):
     """
     Intake endpoint called by the headless Playwright bot as captions stream in.
     """
+    global _LIVE_INTAKE_FEED
     raw_caption = f"{payload.speaker}: {payload.caption}" if payload.speaker else payload.caption
     preview_mask = mask_transcript(payload.caption)["masked_text"]
     logger.info(f"[INTAKE STREAM] RAW: {raw_caption} | MASKED PREVIEW: {preview_mask}")
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "speaker": payload.speaker or "Participant",
+        "caption": payload.caption,
+        "masked_preview": preview_mask,
+    }
+    _LIVE_INTAKE_FEED.append(entry)
+    if len(_LIVE_INTAKE_FEED) > 100:
+        _LIVE_INTAKE_FEED = _LIVE_INTAKE_FEED[-100:]
     return {"status": "received", "length": len(payload.caption)}
 
 

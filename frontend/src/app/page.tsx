@@ -32,6 +32,7 @@ import {
   Check,
   Code,
   ExternalLink,
+  PhoneOff,
 } from "lucide-react";
 
 const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL || "http://localhost:8000";
@@ -87,6 +88,22 @@ interface WebhookEntry {
   status: string;
 }
 
+interface BotStatus {
+  active: boolean;
+  meet_url: string | null;
+  bot_name: string | null;
+  admitted: boolean;
+  captions_captured: number;
+  duration_sec: number;
+}
+
+interface IntakeFeedItem {
+  timestamp: string;
+  speaker: string;
+  caption: string;
+  masked_preview: string;
+}
+
 const SAMPLE_TRANSCRIPTS = [
   {
     title: "Hackathon Core Sync",
@@ -120,6 +137,19 @@ export default function Dashboard() {
   const [showAuditLogs, setShowAuditLogs] = useState<boolean>(false);
   const [showWebhookFeed, setShowWebhookFeed] = useState<boolean>(false);
 
+  // Active Bot & Live Intake Feed State
+  const [botStatus, setBotStatus] = useState<BotStatus>({
+    active: false,
+    meet_url: null,
+    bot_name: null,
+    admitted: false,
+    captions_captured: 0,
+    duration_sec: 0,
+  });
+  const [stoppingBot, setStoppingBot] = useState<boolean>(false);
+  const [intakeFeed, setIntakeFeed] = useState<IntakeFeedItem[]>([]);
+  const [showIntakeFeed, setShowIntakeFeed] = useState<boolean>(true);
+
   // Live Meeting Join & Scheduling State
   const [meetUrl, setMeetUrl] = useState<string>("https://meet.google.com/xyz-abcd-efg");
   const [joinTime, setJoinTime] = useState<string>("");
@@ -129,7 +159,7 @@ export default function Dashboard() {
   const [showInTabGuide, setShowInTabGuide] = useState<boolean>(true);
   const [copiedSnippet, setCopiedSnippet] = useState<boolean>(false);
 
-  // Health & Task Polling
+  // Health, Task & Bot Polling
   const checkHealth = async () => {
     try {
       const res = await axios.get(`${PROXY_URL}/health`, { timeout: 3000 });
@@ -137,6 +167,24 @@ export default function Dashboard() {
       setRamTokensCount(res.data.ephemeral_tokens_in_ram || 0);
     } catch {
       setProxyHealthy(false);
+    }
+  };
+
+  const fetchBotStatus = async () => {
+    try {
+      const res = await axios.get(`${PROXY_URL}/api/bot/status`, { timeout: 3000 });
+      setBotStatus(res.data);
+    } catch (e) {
+      console.debug("Bot status fetch deferred:", e);
+    }
+  };
+
+  const fetchIntakeFeed = async () => {
+    try {
+      const res = await axios.get(`${PROXY_URL}/api/intake/feed`, { timeout: 3000 });
+      setIntakeFeed(res.data);
+    } catch (e) {
+      console.debug("Intake feed fetch deferred:", e);
     }
   };
 
@@ -167,17 +215,42 @@ export default function Dashboard() {
     }
   };
 
+  const handleStopBot = async () => {
+    setStoppingBot(true);
+    try {
+      await axios.post(`${PROXY_URL}/api/bot/stop`);
+      setSchedulerNotice({
+        type: "success",
+        message: "🔴 Leaving Google Meet call... Finalizing zero-leak briefing and rehydrating action items!",
+      });
+      setTimeout(async () => {
+        await fetchTasks();
+        await fetchAuditLogs();
+        await fetchWebhookFeed();
+        await fetchBotStatus();
+        setStoppingBot(false);
+      }, 5000);
+    } catch (e: any) {
+      alert(`Stop bot failed: ${e.response?.data?.detail || e.message}`);
+      setStoppingBot(false);
+    }
+  };
+
   useEffect(() => {
     checkHealth();
     fetchTasks();
     fetchAuditLogs();
     fetchWebhookFeed();
+    fetchBotStatus();
+    fetchIntakeFeed();
     const interval = setInterval(() => {
       checkHealth();
       fetchTasks();
       fetchAuditLogs();
       fetchWebhookFeed();
-    }, 8000);
+      fetchBotStatus();
+      fetchIntakeFeed();
+    }, 3000);
     return () => clearInterval(interval);
   }, []);
 
@@ -512,6 +585,87 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
+
+          {/* Active Google Meet Bot Live Control Banner */}
+          {botStatus.active && (
+            <div className="mt-5 p-4 rounded-xl bg-emerald-950/60 border border-emerald-500/50 shadow-lg shadow-emerald-950/30 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 animate-in fade-in">
+              <div className="flex items-start md:items-center space-x-3">
+                <div className="relative flex h-3.5 w-3.5 mt-0.5 md:mt-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500"></span>
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-sm font-bold text-emerald-300">
+                      {botStatus.admitted ? "🟢 Bot Active in Google Meet Call" : "🟡 Bot in Lobby / Requesting Join..."}
+                    </span>
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-900/80 border border-emerald-700 text-emerald-200 font-mono font-medium">
+                      {botStatus.captions_captured} captions captured
+                    </span>
+                  </div>
+                  <div className="text-xs text-slate-300 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span className="text-slate-400">Target: <span className="text-cyan-300 font-mono">{botStatus.meet_url}</span></span>
+                    <span>•</span>
+                    <span>Elapsed: <strong className="text-white font-mono">{Math.floor(botStatus.duration_sec / 60)}m {botStatus.duration_sec % 60}s</strong></span>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleStopBot}
+                disabled={stoppingBot}
+                className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 active:bg-red-700 text-white text-xs font-bold shadow-md shadow-red-950 flex items-center space-x-2 transition-all whitespace-nowrap disabled:opacity-50"
+              >
+                {stoppingBot ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PhoneOff className="w-4 h-4" />}
+                <span>Leave Call & Generate Briefing</span>
+              </button>
+            </div>
+          )}
+
+          {/* Real-time Intake Caption Feed */}
+          {intakeFeed.length > 0 && (
+            <div className="mt-5 rounded-xl bg-slate-950/80 border border-slate-800 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2 text-xs font-semibold text-slate-300">
+                  <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
+                  <span>Live Privacy-Preserving Caption Stream (Presidio Masked)</span>
+                  <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full font-mono">
+                    {intakeFeed.length} chunks
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowIntakeFeed(!showIntakeFeed)}
+                  className="text-[11px] text-slate-400 hover:text-white flex items-center space-x-1"
+                >
+                  <span>{showIntakeFeed ? "Collapse" : "Expand"}</span>
+                  {showIntakeFeed ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                </button>
+              </div>
+
+              {showIntakeFeed && (
+                <div className="max-h-48 overflow-y-auto space-y-2 pr-1 text-xs">
+                  {intakeFeed.slice(-8).map((chunk, idx) => (
+                    <div key={idx} className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 flex flex-col gap-1 font-mono text-[11px]">
+                      <div className="flex items-center justify-between text-[10px] text-slate-500">
+                        <span className="text-cyan-400 font-semibold">{chunk.speaker}</span>
+                        <span>{new Date(chunk.timestamp).toLocaleTimeString()}</span>
+                      </div>
+                      <div className="text-slate-300">
+                        <span className="text-slate-500 mr-2 text-[10px]">RAW:</span>
+                        <span>{chunk.caption}</span>
+                      </div>
+                      <div className="text-emerald-400/90">
+                        <span className="text-emerald-600 mr-2 text-[10px]">MASKED:</span>
+                        <span>{chunk.masked_preview}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Google Meet Bot Access Guidance Card */}
           {showInTabGuide && (

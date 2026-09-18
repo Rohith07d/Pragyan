@@ -85,6 +85,13 @@ class AegisMeetBot:
         self.page: Optional[Page] = None
         self.collected_chunks: List[str] = []
         self._is_running = False
+        self.is_admitted = False
+        self.admitted_time: Optional[float] = None
+
+    def stop(self):
+        """Signals the running bot loop to stop and finalize processing."""
+        logger.info("Stop signal received for AegisMeetBot.")
+        self._is_running = False
 
     async def send_intake_chunk(self, speaker: str, text: str):
         """Streams an extracted caption chunk to the local FastAPI proxy."""
@@ -141,7 +148,7 @@ class AegisMeetBot:
             logger.info(json.dumps(result.get("rehydrated_result", {}), indent=2))
         return result
 
-    async def join_google_meet(self, max_duration_sec: int = 300):
+    async def join_google_meet(self, max_duration_sec: int = 3600):
         """
         Launches Google Chrome (via CDP for 100% native macOS Keychain & cookies),
         enters the lobby, handles name & media toggles, clicks Ask to Join,
@@ -348,11 +355,13 @@ class AegisMeetBot:
                     'button[aria-label*="Leave call" i]'
                 )
                 admitted = False
-                for _ in range(120):  # Wait up to 2 minutes
+                for _ in range(180):  # Wait up to 3 minutes for host admission
                     try:
                         in_call = self.page.locator(in_call_sel)
                         if await in_call.count() > 0 and await in_call.first.is_visible():
                             admitted = True
+                            self.is_admitted = True
+                            self.admitted_time = time.time()
                             logger.info("Bot admitted into Google Meet call by host!")
                             break
                         body_now = await self.page.inner_text("body")
@@ -365,34 +374,79 @@ class AegisMeetBot:
 
                 if not admitted:
                     logger.warning("Host admission wait finished or call not yet admitted.")
+                    self.is_admitted = True
+                    self.admitted_time = time.time()
 
-                # Step 7: Enable Closed Captions
-                logger.info("Locating and clicking captions toggle...")
+                # Step 7: Enable Closed Captions & Dismiss Modals
+                logger.info("Configuring Closed Captions...")
                 await asyncio.sleep(2)
-                caption_button_clicked = False
-                caption_selectors = [
-                    'button[aria-label="Turn on captions"]',
-                    'button[aria-label*="Turn on captions" i]',
-                    'button[aria-label*="captions" i]',
-                    'button[data-tooltip*="captions" i]',
+
+                # Check if captions are already active
+                turn_off_selectors = [
+                    'button[aria-label*="Turn off captions" i]',
+                    'button[aria-label*="ondertiteling uitschakelen" i]',
+                    'button[aria-label*="Disable captions" i]',
                 ]
-                for selector in caption_selectors:
+                captions_already_on = False
+                for sel in turn_off_selectors:
                     try:
-                        btn = self.page.locator(selector)
+                        btn = self.page.locator(sel)
                         if await btn.count() > 0 and await btn.first.is_visible():
-                            await btn.first.click()
-                            caption_button_clicked = True
-                            logger.info(f"Clicked caption toggle button ({selector}).")
+                            captions_already_on = True
+                            logger.info(f"Closed captions are already turned on ({sel}).")
                             break
                     except Exception:
                         pass
 
-                if not caption_button_clicked:
-                    await self.page.keyboard.press("c")
-                    logger.info("Sent keyboard shortcut 'c' to enable captions.")
+                if not captions_already_on:
+                    turn_on_selectors = [
+                        'button[aria-label*="Turn on captions" i]',
+                        'button[aria-label*="ondertiteling inschakelen" i]',
+                        'button[aria-label*="Enable captions" i]',
+                        'button[data-tooltip*="captions" i]',
+                    ]
+                    clicked = False
+                    for sel in turn_on_selectors:
+                        try:
+                            btn = self.page.locator(sel)
+                            if await btn.count() > 0 and await btn.first.is_visible():
+                                await btn.first.click()
+                                clicked = True
+                                logger.info(f"Clicked caption toggle button ({sel}).")
+                                break
+                        except Exception:
+                            pass
 
-                # Step 8: Stream captions via DOM MutationObserver & DOM polling
-                logger.info(f"Listening for captions (monitoring up to {max_duration_sec}s)...")
+                    if not clicked:
+                        logger.info("Pressing keyboard shortcut 'c' to enable captions...")
+                        await self.page.keyboard.press("c")
+
+                    await asyncio.sleep(1.5)
+
+                # Auto-dismiss language picker or settings dialog if opened
+                try:
+                    modal_dialogs = self.page.locator('div[role="dialog"], div[aria-modal="true"]')
+                    if await modal_dialogs.count() > 0 and await modal_dialogs.first.is_visible():
+                        logger.info("Language selection / caption modal detected; dismissing...")
+                        dismiss_btns = ["Save", "Apply", "Done", "Got it", "Begrepen", "Close"]
+                        dismissed = False
+                        for text in dismiss_btns:
+                            d_btn = modal_dialogs.locator(f'button:has-text("{text}")')
+                            if await d_btn.count() > 0 and await d_btn.first.is_visible():
+                                await d_btn.first.click()
+                                dismissed = True
+                                logger.info(f"Clicked modal confirmation button: '{text}'")
+                                break
+                        if not dismissed:
+                            # Press Escape to dismiss the modal without toggling captions off
+                            await self.page.keyboard.press("Escape")
+                            logger.info("Pressed Escape key to dismiss caption language modal.")
+                        await asyncio.sleep(1)
+                except Exception as e:
+                    logger.debug(f"Modal check warning: {e}")
+
+                # Step 8: Stream captions via intelligent, container-scoped DOM scraper
+                logger.info(f"Listening for speech captions (monitoring up to {max_duration_sec}s)...")
                 self._is_running = True
                 start_time = time.time()
                 seen_texts = set()
@@ -407,55 +461,212 @@ class AegisMeetBot:
                     await self.page.expose_function("aegisMutationBridge", handle_browser_caption)
 
                     await self.page.evaluate("""() => {
-                        const observer = new MutationObserver((mutations) => {
-                            for (const m of mutations) {
-                                for (const node of m.addedNodes) {
-                                    if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) {
-                                        const txt = (node.textContent || "").trim();
-                                        if (txt.length > 2) {
-                                            let spk = "Participant";
-                                            const parent = node.parentElement ? node.parentElement.closest('div[jscontroller="D1tHje"]') : null;
-                                            if (parent) {
-                                                const header = parent.querySelector('div.zs75Ib, div.jxFHg');
-                                                if (header) spk = header.textContent.trim();
-                                            }
-                                            if (window.aegisMutationBridge) {
-                                                window.aegisMutationBridge(spk, txt);
-                                            }
+                        if (window.__AEGIS_SCRAPER_ACTIVE__) return;
+                        window.__AEGIS_SCRAPER_ACTIVE__ = true;
+
+                        const UI_BLACKLIST = [
+                            'open caption settings',
+                            'turn off captions',
+                            'turn on captions',
+                            'captions settings',
+                            'caption settings',
+                            'meeting details',
+                            'people',
+                            'chat with everyone',
+                            'activities',
+                            'host controls',
+                            'leave call',
+                            'you are presenting',
+                            "you're presenting",
+                            'your microphone is off',
+                            'jump to recent messages',
+                            'select a language',
+                            'captions language',
+                        ];
+
+                        const COMMON_LANGUAGES = [
+                            'afrikaans', 'albanian', 'amharic', 'arabic', 'armenian', 'assamese',
+                            'azerbaijani', 'basque', 'belarusian', 'bengali', 'bosnian', 'bulgarian',
+                            'catalan', 'cebuano', 'chinese', 'corsican', 'croatian', 'czech',
+                            'danish', 'dutch', 'english', 'esperanto', 'estonian', 'filipino',
+                            'finnish', 'french', 'frisian', 'galician', 'georgian', 'german',
+                            'greek', 'gujarati', 'hebrew', 'hindi', 'hungarian', 'icelandic',
+                            'indonesian', 'irish', 'italian', 'japanese', 'kannada', 'korean',
+                            'latin', 'latvian', 'lithuanian', 'malay', 'malayalam', 'marathi',
+                            'mongolian', 'nepali', 'norwegian', 'persian', 'polish', 'portuguese',
+                            'punjabi', 'romanian', 'russian', 'serbian', 'slovak', 'slovenian',
+                            'spanish', 'swahili', 'swedish', 'tamil', 'telugu', 'thai', 'turkish',
+                            'ukrainian', 'urdu', 'vietnamese', 'welsh', 'zulu'
+                        ];
+
+                        function isUiNoise(text) {
+                            if (!text || text.length < 2) return true;
+                            const lower = text.toLowerCase().trim();
+
+                            // 1. Filter out clock timestamps e.g. "9:24", "09:25", "9:26 PM"
+                            if (/^\\d{1,2}:\\d{2}(\\s*(am|pm))?$/i.test(lower)) return true;
+
+                            // 2. Filter out known UI strings
+                            for (const item of UI_BLACKLIST) {
+                                if (lower === item || lower.includes(item)) return true;
+                            }
+
+                            // 3. Filter out language menu lists
+                            let langHits = 0;
+                            for (const lang of COMMON_LANGUAGES) {
+                                if (lower.includes(lang)) langHits++;
+                                if (langHits >= 3) return true;
+                            }
+
+                            return false;
+                        }
+
+                        // Map to track active DOM caption blocks
+                        const trackedBlocks = new Map();
+
+                        function flushRecord(record) {
+                            if (!record) return;
+                            const unsent = record.fullText.slice(record.sentLength).trim();
+                            if (unsent.length > 1 && !isUiNoise(unsent)) {
+                                if (window.aegisMutationBridge) {
+                                    window.aegisMutationBridge(record.speaker, unsent);
+                                }
+                                record.sentLength = record.fullText.length;
+                            }
+                        }
+
+                        function scanCaptions() {
+                            // Look for Google Meet caption containers (and mock-meet container)
+                            const containers = document.querySelectorAll(
+                                'div[jscontroller="D1tHje"], div[jsname="YSxPtf"], div.a4bIc, div.T4LgNb'
+                            );
+                            const now = Date.now();
+                            const activeElements = new Set();
+
+                            containers.forEach(el => {
+                                // Find speaker label
+                                let speaker = "Participant";
+                                const spkEl = el.querySelector('div.zs75Ib, div.jxFHg, span[jsname="V67aGc"]') ||
+                                              el.closest('div[jscontroller="D1tHje"]')?.querySelector('div.zs75Ib, div.jxFHg');
+                                if (spkEl) {
+                                    const s = spkEl.textContent.trim();
+                                    if (s && !isUiNoise(s)) speaker = s;
+                                }
+
+                                // Find caption text
+                                const textEl = el.querySelector('.a4bIc, div[jsname="YSxPtf"], span.yg3OAc') || el;
+                                let rawText = textEl.textContent.trim();
+
+                                // If raw text starts with the speaker name, strip it
+                                if (speaker && rawText.startsWith(speaker)) {
+                                    rawText = rawText.slice(speaker.length).trim();
+                                }
+
+                                if (isUiNoise(rawText)) return;
+
+                                activeElements.add(el);
+
+                                let record = trackedBlocks.get(el);
+                                if (!record) {
+                                    record = {
+                                        speaker: speaker,
+                                        fullText: rawText,
+                                        sentLength: 0,
+                                        lastChangedTime: now
+                                    };
+                                    trackedBlocks.set(el, record);
+                                } else {
+                                    if (rawText !== record.fullText) {
+                                        record.fullText = rawText;
+                                        record.lastChangedTime = now;
+                                        if (speaker && speaker !== "Participant") {
+                                            record.speaker = speaker;
                                         }
                                     }
                                 }
+
+                                // Flush condition 1: speaker paused for >= 1200ms
+                                if (now - record.lastChangedTime >= 1200 && record.fullText.length > record.sentLength) {
+                                    flushRecord(record);
+                                } else if (record.fullText.length - record.sentLength > 50) {
+                                    // Flush condition 2: completed sentence (. ? !) in a long thought
+                                    const unsent = record.fullText.slice(record.sentLength);
+                                    const match = unsent.match(/^(.+?[.?!])\\s+/);
+                                    if (match) {
+                                        const sentence = match[1].trim();
+                                        if (sentence && !isUiNoise(sentence)) {
+                                            if (window.aegisMutationBridge) {
+                                                window.aegisMutationBridge(record.speaker, sentence);
+                                            }
+                                            record.sentLength += match[0].length;
+                                        }
+                                    }
+                                }
+                            });
+
+                            // Flush condition 3: element removed from DOM (speech bubble faded out)
+                            for (const [el, record] of trackedBlocks.entries()) {
+                                if (!activeElements.has(el) || !document.body.contains(el)) {
+                                    flushRecord(record);
+                                    trackedBlocks.delete(el);
+                                }
                             }
-                        });
-                        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+                        }
+
+                        // Run continuous scanner every 350ms
+                        window.__AEGIS_SCAN_INTERVAL__ = setInterval(scanCaptions, 350);
+
+                        // Also trigger on DOM mutations for instant reactivity
+                        const obs = new MutationObserver(() => scanCaptions());
+                        obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+                        window.__AEGIS_OBSERVER__ = obs;
+
+                        window.__AEGIS_FLUSH_ALL__ = () => {
+                            for (const record of trackedBlocks.values()) {
+                                flushRecord(record);
+                            }
+                            trackedBlocks.clear();
+                        };
                     }""")
-                    logger.info("DOM MutationObserver successfully registered for real-time caption scraping.")
+                    logger.info("Intelligent caption scraper registered successfully.")
                 except Exception as e:
-                    logger.warning(f"Could not register MutationObserver ({e}); relying on polling observer.")
+                    logger.warning(f"Could not register client-side scraper ({e}); relying on polling.")
 
                 while self._is_running and (time.time() - start_time < max_duration_sec):
                     try:
+                        # Fallback query for any un-flushed elements directly via Playwright
                         caption_elements = await self.page.query_selector_all(
                             'div[jsname="YSxPtf"], div.a4bIc, span.yg3OAc'
                         )
                         for el in caption_elements:
                             text = (await el.inner_text()).strip()
+                            if not text or len(text) < 2 or (":" in text and len(text) <= 5):
+                                continue
+                            speaker = "Participant"
+                            parent = await el.evaluate_handle("el => el.closest('div[jscontroller=\"D1tHje\"]') || el.parentElement")
+                            if parent:
+                                speaker_el = await parent.as_element().query_selector('div.zs75Ib, div.jxFHg')
+                                if speaker_el:
+                                    s_txt = (await speaker_el.inner_text()).strip()
+                                    if s_txt:
+                                        speaker = s_txt
+                            if text.startswith(speaker):
+                                text = text[len(speaker):].strip()
                             if text and text not in seen_texts:
                                 seen_texts.add(text)
-                                speaker = "Participant"
-                                parent = await el.evaluate_handle("el => el.closest('div[jscontroller=\"D1tHje\"]') || el.parentElement")
-                                if parent:
-                                    speaker_el = await parent.as_element().query_selector('div.zs75Ib, div.jxFHg')
-                                    if speaker_el:
-                                        speaker = (await speaker_el.inner_text()).strip()
-
                                 await self.send_intake_chunk(speaker, text)
                     except Exception as e:
                         logger.debug(f"Caption polling interval: {e}")
 
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.8)
 
                 # Finalize
+                try:
+                    await self.page.evaluate("() => { if (window.__AEGIS_FLUSH_ALL__) window.__AEGIS_FLUSH_ALL__(); }")
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+
                 logger.info("Meeting monitoring completed.")
                 await self.trigger_final_processing()
                 if self.context:
@@ -511,15 +722,16 @@ def login_flow():
 
 async def run_live_bot(
     meet_url: str,
-    duration_sec: int = 180,
+    duration_sec: int = 3600,
     bot_name: str = "AegisMeet Notetaker",
     proxy_url: str = DEFAULT_PROXY_URL,
     headless: bool = False,
+    bot_instance: Optional[AegisMeetBot] = None,
 ) -> Optional[Dict]:
     """
     Entrypoint invoked by FastAPI proxy scheduler (APScheduler) or ad-hoc /join endpoint.
     """
-    bot = AegisMeetBot(
+    bot = bot_instance or AegisMeetBot(
         meeting_url=meet_url,
         bot_name=bot_name,
         proxy_url=proxy_url,
@@ -539,7 +751,7 @@ async def main():
     parser.add_argument("--headful", action="store_true", default=False, help="Run browser in visible mode")
     parser.add_argument("--simulate", action="store_true", help="Run simulated speech caption stream")
     parser.add_argument("--login", action="store_true", help="Open visible browser to sign into Google account once")
-    parser.add_argument("--duration", type=int, default=120, help="Maximum call duration in seconds")
+    parser.add_argument("--duration", type=int, default=3600, help="Maximum call duration in seconds")
 
     args = parser.parse_args()
 
