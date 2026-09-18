@@ -142,28 +142,28 @@ export default function Dashboard() {
 
   const fetchTasks = async () => {
     try {
-      const res = await axios.get(`${PROXY_URL}/api/tasks`, { timeout: 4000 });
+      const res = await axios.get(`${PROXY_URL}/api/tasks`, { timeout: 15000 });
       setTasks(res.data);
     } catch (e) {
-      console.error("Failed to load tasks:", e);
+      console.debug("Tasks fetch deferred:", e);
     }
   };
 
   const fetchAuditLogs = async () => {
     try {
-      const res = await axios.get(`${PROXY_URL}/api/audit-logs`, { timeout: 4000 });
+      const res = await axios.get(`${PROXY_URL}/api/audit-logs`, { timeout: 15000 });
       setAuditLogs(res.data);
     } catch (e) {
-      console.debug("Failed to fetch audit logs:", e);
+      console.debug("Audit logs fetch deferred:", e);
     }
   };
 
   const fetchWebhookFeed = async () => {
     try {
-      const res = await axios.get(`${PROXY_URL}/api/webhooks/feed`, { timeout: 4000 });
+      const res = await axios.get(`${PROXY_URL}/api/webhooks/feed`, { timeout: 15000 });
       setWebhookFeed(res.data);
     } catch (e) {
-      console.debug("Failed to fetch webhook feed:", e);
+      console.debug("Webhook feed fetch deferred:", e);
     }
   };
 

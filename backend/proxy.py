@@ -865,13 +865,14 @@ def aegis_meet_script_endpoint():
 
 @app.post("/join")
 @app.post("/api/join")
-async def join_meeting_endpoint(payload: JoinMeetingPayload, background_tasks: BackgroundTasks):
+async def join_meeting_endpoint(payload: JoinMeetingPayload):
     """
     Instant, ad-hoc meeting join trigger for live testing.
     Dispatches Playwright bot headlessly with permissions bypassed.
     """
     logger.info(f"Received instant join request for Google Meet: {payload.meet_url}")
-    background_tasks.add_task(_execute_bot_session, payload.meet_url, payload.bot_name, payload.duration_sec)
+    import asyncio
+    asyncio.create_task(_execute_bot_session(payload.meet_url, payload.bot_name, payload.duration_sec))
     return {
         "status": "launched",
         "message": f"Playwright bot dispatched to {payload.meet_url}",
