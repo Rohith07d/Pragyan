@@ -21,7 +21,7 @@ import hashlib
 import uuid
 import jwt
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -62,6 +62,14 @@ _ENTITY_COUNTERS: Dict[str, int] = defaultdict(int)
 AUDIT_LOGS: List[Dict[str, Any]] = []
 WEBHOOK_FEED: List[Dict[str, Any]] = []
 
+# Active Meeting Configuration (Phase 4)
+_ACTIVE_MEETING_CONFIG: Dict[str, Any] = {
+    "meeting_id": 1,
+    "expected_participants": [],
+    "share_technical_summary": True,
+    "meeting_purpose": "AegisMeet Meeting",
+}
+
 
 def wipe_ephemeral_ram():
     """Aggressively wipes the in-memory PII tokens and entity mappings."""
@@ -88,39 +96,183 @@ provider = NlpEngineProvider(nlp_configuration=nlp_configuration)
 nlp_engine = provider.create_engine()
 analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
 
-# Add custom team recognizer to guarantee 100% detection for project team members and participants
+# Fallback team names for uninitialized environments
 TEAM_MEMBER_NAMES = [
     "Mayank Sachdeva", "Mayank", "D Rohith", "Rohith",
     "Bachu Sai Sanjeet", "Sai Sanjeet", "Sanjeet",
     "Sambhav Chordia", "Sambhav", "R.Pranav sai", "Pranav sai", "Pranav",
 ]
-team_recognizer = PatternRecognizer(
-    supported_entity="PERSON",
-    deny_list=TEAM_MEMBER_NAMES,
-    name="TeamMemberRecognizer",
-)
-analyzer.registry.add_recognizer(team_recognizer)
-logger.info("Presidio Analyzer ready with custom team member recognizer.")
 
 
-def mask_transcript(text: str) -> Dict[str, Any]:
+def get_canonical_names_for_participants(expected_participants: Optional[List[Any]] = None) -> List[str]:
+    """
+    Phase 4 Dynamic Presidio Recognizer:
+    Retrieves canonical names strictly targeting the expected participants.
+    If expected_participants is empty or None, targets all registered users in SQLite.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    user_ids = []
+    if expected_participants:
+        for p in expected_participants:
+            if isinstance(p, int):
+                user_ids.append(p)
+            elif isinstance(p, str):
+                if p.isdigit():
+                    user_ids.append(int(p))
+                else:
+                    cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (p.strip(),))
+                    row = cursor.fetchone()
+                    if row:
+                        user_ids.append(row[0])
+
+    if user_ids:
+        placeholders = ",".join("?" for _ in user_ids)
+        cursor.execute(f"SELECT canonical_name FROM Users WHERE id IN ({placeholders})", user_ids)
+    else:
+        cursor.execute("SELECT canonical_name FROM Users")
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    names = set()
+    for row in rows:
+        c_name = row[0].strip()
+        if c_name:
+            names.add(c_name)
+            parts = c_name.split()
+            if len(parts) > 1 and len(parts[0]) >= 3:
+                names.add(parts[0])
+
+    if not names:
+        names.update(TEAM_MEMBER_NAMES)
+
+    return sorted(list(names), key=lambda x: len(x), reverse=True)
+
+
+def get_user_alias_map(expected_participants: Optional[List[Any]] = None) -> List[Tuple[str, str]]:
+    """
+    Phase 4 Dynamic Normalization Helper:
+    Queries UserAliases table for expected participants (or all users if empty),
+    returning (alias_string, canonical_name) pairs ordered by length descending.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    user_ids = []
+    if expected_participants:
+        for p in expected_participants:
+            if isinstance(p, int):
+                user_ids.append(p)
+            elif isinstance(p, str):
+                if p.isdigit():
+                    user_ids.append(int(p))
+                else:
+                    cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (p.strip(),))
+                    row = cursor.fetchone()
+                    if row:
+                        user_ids.append(row[0])
+
+    if user_ids:
+        placeholders = ",".join("?" for _ in user_ids)
+        cursor.execute(f"""
+            SELECT ua.alias_string, u.canonical_name
+            FROM UserAliases ua
+            JOIN Users u ON u.id = ua.user_id
+            WHERE ua.user_id IN ({placeholders})
+        """, user_ids)
+    else:
+        cursor.execute("""
+            SELECT ua.alias_string, u.canonical_name
+            FROM UserAliases ua
+            JOIN Users u ON u.id = ua.user_id
+        """)
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    pairs = []
+    seen = set()
+    for alias, canonical in rows:
+        if not alias or not canonical:
+            continue
+        alias_clean = alias.strip()
+        canonical_clean = canonical.strip()
+        if alias_clean.lower() == canonical_clean.lower():
+            continue
+        pair_key = (alias_clean.lower(), canonical_clean)
+        if pair_key not in seen:
+            seen.add(pair_key)
+            pairs.append((alias_clean, canonical_clean))
+
+    pairs.sort(key=lambda x: len(x[0]), reverse=True)
+    return pairs
+
+
+def normalize_transcript_aliases(raw_text: str, expected_participants: Optional[List[Any]] = None) -> str:
+    """
+    Phase 4 Dynamic Normalization:
+    Queries UserAliases for the expected participants and rewrites any misspelled ASR names
+    in the transcript to their canonical_name BEFORE running Presidio.
+    """
+    if not raw_text or not raw_text.strip():
+        return raw_text
+
+    alias_pairs = get_user_alias_map(expected_participants)
+    normalized = raw_text
+    rewrites = []
+
+    for alias, canonical in alias_pairs:
+        # Match whole word / boundary taking hyphens, spaces, and punctuation into account
+        pattern = re.compile(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", re.IGNORECASE)
+        if pattern.search(normalized):
+            normalized = pattern.sub(canonical, normalized)
+            rewrites.append(f"'{alias}' -> '{canonical}'")
+
+    if rewrites:
+        logger.info(f"Dynamic Normalization rewrote {len(rewrites)} ASR aliases: {', '.join(rewrites[:6])}")
+
+    return normalized
+
+
+def mask_transcript(
+    text: str,
+    expected_participants: Optional[List[Any]] = None,
+    normalize_aliases: bool = True,
+) -> Dict[str, Any]:
     """
     Analyzes raw text for PII entities (PERSON, ORGANIZATION, LOCATION, etc.),
     generates structured bracketed tokens (e.g. [PERSON_1], [ORG_1]),
     records them in ephemeral RAM, and returns the sanitized text.
+
+    Phase 4 Enhancements:
+    - Automatically rewrites misspelled ASR names to canonical_name before Presidio.
+    - Configures dynamic PatternRecognizer strictly targeting canonical names of expected_participants.
     """
     if not text.strip():
         return {
             "masked_text": "",
+            "normalized_text": "",
             "entities_found": [],
             "token_map": {},
         }
 
-    # Analyze text with Presidio
+    # Step 0: Dynamic Normalization (rewrite ASR phonetic misspellings before Presidio)
+    normalized_text = normalize_transcript_aliases(text, expected_participants) if normalize_aliases else text
+
+    # Step 1: Dynamic Presidio Recognizer targeting canonical names of expected participants
+    target_names = get_canonical_names_for_participants(expected_participants)
+    dynamic_rec = PatternRecognizer(
+        supported_entity="PERSON",
+        deny_list=target_names,
+        name="DynamicExpectedParticipantsRecognizer",
+    )
+
+    # Analyze text with Presidio using ad_hoc_recognizers
     results = analyzer.analyze(
-        text=text,
+        text=normalized_text,
         language="en",
         entities=["PERSON", "ORGANIZATION", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER"],
+        ad_hoc_recognizers=[dynamic_rec],
     )
 
     # Deduplicate overlapping spans: prioritize highest confidence score
@@ -135,10 +287,10 @@ def mask_transcript(text: str) -> Dict[str, Any]:
     sorted_results = sorted(non_overlapping, key=lambda x: x.start, reverse=True)
 
     detected_entities = []
-    masked_chars = list(text)
+    masked_chars = list(normalized_text)
 
     for res in sorted_results:
-        entity_val = text[res.start:res.end]
+        entity_val = normalized_text[res.start:res.end]
         entity_type = res.entity_type
 
         # Normalize entity type label for token naming
@@ -174,6 +326,7 @@ def mask_transcript(text: str) -> Dict[str, Any]:
 
     return {
         "masked_text": masked_text,
+        "normalized_text": normalized_text,
         "entities_found": detected_entities,
         "token_map": dict(_EPHEMERAL_PII_RAM),
     }
@@ -478,8 +631,23 @@ def save_tasks_to_db(tasks: List[Dict[str, Any]], meeting_id: Optional[int] = 1)
             row = cursor.fetchone()
             if row:
                 assignee_id = row[0]
+            else:
+                # Also check UserAliases table for phonetic or nickname match
+                cursor.execute("SELECT user_id FROM UserAliases WHERE LOWER(alias_string) = LOWER(?)", (assignee_val.strip(),))
+                alias_row = cursor.fetchone()
+                if alias_row:
+                    assignee_id = alias_row[0]
+                else:
+                    # Check prefix on canonical_name
+                    cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) LIKE LOWER(?) || '%'", (assignee_val.strip(),))
+                    prefix_row = cursor.fetchone()
+                    if prefix_row:
+                        assignee_id = prefix_row[0]
 
         task_mid = t.get("meeting_id") or meeting_id
+        deadline_val = (t.get("deadline") or "unknown").strip()
+        if not deadline_val or deadline_val.lower() in ("none", "unspecified", "tbd", "n/a", "null", ""):
+            deadline_val = "unknown"
 
         cursor.execute(
             """
@@ -490,7 +658,7 @@ def save_tasks_to_db(tasks: List[Dict[str, Any]], meeting_id: Optional[int] = 1)
                 task_mid,
                 assignee_id,
                 t.get("task", ""),
-                t.get("deadline", "unknown"),
+                deadline_val,
                 t.get("status", "pending"),
             ),
         )
@@ -874,35 +1042,61 @@ def save_user_aliases_to_db(user_id: int, canonical_name: str, aliases: List[str
 # ==============================================================================
 # Featherless AI Client / Reasoning Layer
 # ==============================================================================
-SYSTEM_PROMPT = """You are AegisMeet Reasoning Agent, an air-gapped meeting intelligence engine.
+def build_system_prompt(meeting_purpose: str = "AegisMeet Sync", share_technical_summary: bool = True) -> str:
+    """
+    Phase 4 Context-Aware System Prompt:
+    - Injects meeting_purpose into analysis context
+    - Enforces assigning 'unknown' to deadlines if no explicit date/time is mentioned
+    - Omits deeply technical architecture details if share_technical_summary is False
+    """
+    if share_technical_summary:
+        tech_rule = (
+            "Include technical architecture details, system components, and infrastructure decisions in the summaries."
+        )
+    else:
+        tech_rule = (
+            "OMIT deeply technical architecture details, internal database schemas, and low-level code implementation details. "
+            "Provide concise, high-level operational and business-friendly summaries only."
+        )
+
+    return f"""You are AegisMeet Reasoning Agent, an air-gapped meeting intelligence engine.
 You receive meeting transcripts that have been sanitized: personal names and company names are masked with tokens like [PERSON_1], [ORG_1], [LOCATION_1], etc.
+
+MEETING CONTEXT:
+- Purpose / Topic: {meeting_purpose}
+- Summary Granularity: {"Detailed Technical & Operational" if share_technical_summary else "High-Level Executive"}
 
 CRITICAL DIRECTIVES:
 1. NEVER alter, translate, or invent bracketed tokens. Retain exact tokens such as [PERSON_1] as the assignee.
-2. Output STRICTLY a valid JSON object with no preamble, markdown code fences, or conversational text.
-3. You MUST use standard double quotes (") around ALL keys and string values. NEVER use single quotes (').
-4. Follow this EXACT JSON schema:
-{
-  "pm_view": "string (high-level blockers, risks, and resource dependencies)",
+2. DEADLINE ENFORCEMENT: If a task has no explicitly mentioned date or time in the transcript, you MUST assign the deadline as exactly "unknown". Do NOT guess, assume, or hallucinate deadlines.
+3. TECHNICAL DETAIL RULE: {tech_rule}
+4. Output STRICTLY a valid JSON object with no preamble, markdown code fences, or conversational text.
+5. You MUST use standard double quotes (") around ALL keys and string values. NEVER use single quotes (').
+6. Follow this EXACT JSON schema:
+{{
+  "pm_view": "string (high-level blockers, risks, and resource dependencies contextualized to {meeting_purpose})",
   "group_view": "string (core decisions, deliverables, and team milestones)",
   "absent_view": "string (concise catch-up summary for members who missed the call)",
   "tasks": [
-    {
+    {{
       "assignee": "[PERSON_X]",
       "task": "string (action item description)",
-      "deadline": "string (e.g. tomorrow, next Friday, YYYY-MM-DD, or Unspecified)"
-    }
+      "deadline": "string (exact date/time mentioned, OR exactly 'unknown' if no date/time mentioned)"
+    }}
   ],
   "user_alerts": [
-    {
+    {{
       "user": "[PERSON_X]",
       "alert_type": "action_item | deadline | mention",
       "severity": "high | medium",
       "message": "string (concise alert describing what this user needs to act on)"
-    }
+    }}
   ]
-}
+}}
 """
+
+# Default system prompt for backwards compatibility
+SYSTEM_PROMPT = build_system_prompt()
 
 
 def robust_json_parse(raw_content: str) -> Dict[str, Any]:
@@ -962,23 +1156,34 @@ def robust_json_parse(raw_content: str) -> Dict[str, Any]:
     return json.loads(candidate)
 
 
-async def query_featherless_ai(sanitized_transcript: str) -> Dict[str, Any]:
+async def query_featherless_ai(
+    sanitized_transcript: str,
+    meeting_purpose: str = "AegisMeet Sync",
+    share_technical_summary: bool = True,
+) -> Dict[str, Any]:
     """
     Zero-Leak Enforcement: Sends ONLY the masked/sanitized transcript to Featherless AI.
+    Dynamic Context: Injects meeting_purpose, share_technical_summary flag, and unknown deadline rule.
     """
     if not FEATHERLESS_API_KEY:
         logger.warning("FEATHERLESS_API_KEY is not configured. Running offline deterministic reasoning fallback.")
-        return mock_offline_reasoning(sanitized_transcript)
+        return mock_offline_reasoning(
+            sanitized_transcript,
+            meeting_purpose=meeting_purpose,
+            share_technical_summary=share_technical_summary,
+        )
 
     headers = {
         "Authorization": f"Bearer {FEATHERLESS_API_KEY}",
         "Content-Type": "application/json",
     }
 
+    system_content = build_system_prompt(meeting_purpose, share_technical_summary)
+
     payload = {
         "model": FEATHERLESS_MODEL,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_content},
             {
                 "role": "user",
                 "content": f"Analyze the following sanitized meeting transcript and produce the required JSON schema:\n\n{sanitized_transcript}",
@@ -1012,49 +1217,81 @@ async def query_featherless_ai(sanitized_transcript: str) -> Dict[str, Any]:
             logger.warning(f"Featherless AI call with {model_name} failed: {e}. Checking next fallback option.")
 
     logger.error("All Featherless AI candidate models failed. Engaging deterministic fallback reasoning.")
-    fallback = mock_offline_reasoning(sanitized_transcript)
+    fallback = mock_offline_reasoning(
+        sanitized_transcript,
+        meeting_purpose=meeting_purpose,
+        share_technical_summary=share_technical_summary,
+    )
     fallback["pm_view"] += " (Note: Featherless cloud response encountered error; safe local reasoning fallback engaged)"
     return fallback
 
 
-def mock_offline_reasoning(sanitized_transcript: str) -> Dict[str, Any]:
+def mock_offline_reasoning(
+    sanitized_transcript: str,
+    meeting_purpose: str = "AegisMeet Sync",
+    share_technical_summary: bool = True,
+) -> Dict[str, Any]:
     """
     Deterministic offline fallback reasoning engine for local testing without cloud API keys.
-    Extracts tokens and builds compliant schema.
+    Follows Phase 4 directives:
+    - Contextualizes views with meeting_purpose
+    - If task has no explicitly mentioned date/time, sets deadline to 'unknown'
+    - If share_technical_summary is False, omits deeply technical architecture details
     """
-    # Detect any tokens present
     tokens = re.findall(r"\[[A-Z]+_\d+\]", sanitized_transcript)
     primary_person = tokens[0] if tokens else "[PERSON_1]"
     secondary_person = tokens[1] if len(tokens) > 1 else "[PERSON_2]"
 
+    # Date/time detection regex
+    date_pattern = re.compile(
+        r"\b(tomorrow(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week)|today(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{4}-\d{2}-\d{2})\b",
+        re.IGNORECASE,
+    )
+    all_dates = date_pattern.findall(sanitized_transcript)
+    deadline_1 = all_dates[0].strip() if len(all_dates) > 0 else "unknown"
+    deadline_2 = all_dates[1].strip() if len(all_dates) > 1 else "unknown"
+
+    if share_technical_summary:
+        pm_view = f"Meeting Purpose: {meeting_purpose}. Technical review highlighted architecture dependencies led by {primary_person}. Cloud schema and zero-leak boundary aligned."
+        group_view = f"Decided to proceed with zero-leak proxy implementation for {meeting_purpose}. {secondary_person} leading core tasks."
+        absent_view = f"The team reviewed system architecture for {meeting_purpose}. {primary_person} identified API constraints; deliverables delegated to {secondary_person}."
+        task1_title = "Complete frontend dashboard and proxy integration"
+        task2_title = "Review security audit logs and verify zero-leak compliance"
+    else:
+        pm_view = f"Meeting Purpose: {meeting_purpose}. Executive overview: Operational alignment achieved. Delivery schedules confirmed with {primary_person}."
+        group_view = f"High-level strategy confirmed for {meeting_purpose}. Deliverables assigned to team leads."
+        absent_view = f"Brief executive sync regarding {meeting_purpose}. General progress reviewed and deliverables delegated to {secondary_person}."
+        task1_title = "Coordinate team deliverables and project updates"
+        task2_title = "Prepare executive briefing and status report"
+
     return {
-        "pm_view": f"Risk assessment: Potential delivery bottleneck highlighted by {primary_person}. Architecture alignment required before proceeding.",
-        "group_view": f"Decided to proceed with zero-leak proxy implementation. {secondary_person} leading core tasks.",
-        "absent_view": f"The team reviewed project architecture. {primary_person} identified API constraints; action items delegated to {secondary_person}.",
+        "pm_view": pm_view,
+        "group_view": group_view,
+        "absent_view": absent_view,
         "tasks": [
             {
                 "assignee": secondary_person,
-                "task": "Complete frontend dashboard and proxy integration",
-                "deadline": "Tomorrow 5:00 PM",
+                "task": task1_title,
+                "deadline": deadline_1,
             },
             {
                 "assignee": primary_person,
-                "task": "Review security audit logs and verify zero-leak compliance",
-                "deadline": "Next Friday",
+                "task": task2_title,
+                "deadline": deadline_2,
             },
         ],
         "user_alerts": [
             {
                 "user": secondary_person,
-                "alert_type": "deadline",
+                "alert_type": "action_item",
                 "severity": "high",
-                "message": "Action Item Due Tomorrow 5:00 PM: Complete frontend dashboard and proxy integration",
+                "message": f"Action Item for {meeting_purpose}: {task1_title} (Deadline: {deadline_1})",
             },
             {
                 "user": primary_person,
                 "alert_type": "action_item",
                 "severity": "medium",
-                "message": "Assigned Action Item: Review security audit logs and verify zero-leak compliance before Next Friday",
+                "message": f"Assigned item for {meeting_purpose}: {task2_title} (Deadline: {deadline_2})",
             },
         ],
     }
@@ -1148,6 +1385,10 @@ app.add_middleware(
 # ==============================================================================
 class TranscriptPayload(BaseModel):
     transcript: str = Field(..., description="Raw meeting caption or transcript text")
+    meeting_id: Optional[int] = Field(None, description="Associated meeting ID")
+    expected_participants: Optional[List[Any]] = Field(None, description="Expected participant IDs or canonical names")
+    share_technical_summary: Optional[bool] = Field(None, description="Whether to include technical architecture details")
+    meeting_purpose: Optional[str] = Field(None, description="Meeting topic or purpose")
 
 
 class IntakePayload(BaseModel):
@@ -1158,8 +1399,11 @@ class IntakePayload(BaseModel):
 
 class JoinMeetingPayload(BaseModel):
     meet_url: str = Field(..., description="Google Meet URL to join")
-    bot_name: Optional[str] = "AegisMeet Notetaker"
-    duration_sec: Optional[int] = 3600
+    expected_participants: Optional[List[Any]] = Field(default_factory=list, description="Expected participant IDs or canonical names")
+    share_technical_summary: Optional[bool] = Field(True, description="Flag whether to share deep technical details")
+    meeting_purpose: Optional[str] = Field("AegisMeet Meeting", description="Meeting topic or purpose")
+    bot_name: Optional[str] = Field("AegisMeet Notetaker", description="Display name for bot")
+    duration_sec: Optional[int] = Field(3600, description="Max session duration in seconds")
 
 
 class ScheduleMeetingPayload(BaseModel):
@@ -1596,15 +1840,63 @@ async def join_meeting_endpoint(payload: JoinMeetingPayload):
     """
     Instant, ad-hoc meeting join trigger for live testing.
     Dispatches Playwright bot headlessly with permissions bypassed.
+    Persists meeting config in relational SQLite Meetings table and updates _ACTIVE_MEETING_CONFIG.
     """
+    global _ACTIVE_MEETING_CONFIG
     logger.info(f"Received instant join request for Google Meet: {payload.meet_url}")
+
+    # Resolve expected_participants to user IDs
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    participant_ids = []
+    for p in (payload.expected_participants or []):
+        if isinstance(p, int):
+            participant_ids.append(p)
+        elif isinstance(p, str):
+            if p.isdigit():
+                participant_ids.append(int(p))
+            else:
+                cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (p.strip(),))
+                row = cursor.fetchone()
+                if row:
+                    participant_ids.append(row[0])
+
+    purpose_str = payload.meeting_purpose or "AegisMeet Ad-Hoc Sync"
+    share_tech = payload.share_technical_summary if payload.share_technical_summary is not None else True
+    config_flags_dict = {
+        "expected_participants": participant_ids,
+        "share_technical_summary": share_tech,
+        "meet_url": payload.meet_url,
+    }
+    config_flags_json = json.dumps(config_flags_dict)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        "INSERT INTO Meetings (purpose, scheduled_time, config_flags) VALUES (?, ?, ?)",
+        (purpose_str, now_iso, config_flags_json),
+    )
+    conn.commit()
+    meeting_id = cursor.lastrowid
+    conn.close()
+
+    _ACTIVE_MEETING_CONFIG = {
+        "meeting_id": meeting_id,
+        "expected_participants": participant_ids,
+        "share_technical_summary": share_tech,
+        "meeting_purpose": purpose_str,
+    }
+
     import asyncio
-    asyncio.create_task(_execute_bot_session(payload.meet_url, payload.bot_name, payload.duration_sec))
+    asyncio.create_task(_execute_bot_session(payload.meet_url, payload.bot_name or "AegisMeet Notetaker", payload.duration_sec or 3600))
     return {
         "status": "launched",
+        "meeting_id": meeting_id,
         "message": f"Playwright bot dispatched to {payload.meet_url}",
         "meet_url": payload.meet_url,
         "bot_name": payload.bot_name,
+        "expected_participants": participant_ids,
+        "share_technical_summary": share_tech,
+        "meeting_purpose": purpose_str,
     }
 
 
@@ -1616,6 +1908,7 @@ async def schedule_meeting_endpoint(payload: ScheduleMeetingPayload):
     Accepts { meet_url, join_time, expected_participants, share_technical_summary, meeting_purpose }.
     Persists meeting in relational SQLite Meetings table and uses APScheduler to trigger bot at join_time.
     """
+    global _ACTIVE_MEETING_CONFIG
     try:
         clean_time = payload.join_time.replace("Z", "+00:00")
         target_dt = datetime.fromisoformat(clean_time)
@@ -1641,9 +1934,10 @@ async def schedule_meeting_endpoint(payload: ScheduleMeetingPayload):
                 if row:
                     participant_ids.append(row[0])
 
+    share_tech = payload.share_technical_summary if payload.share_technical_summary is not None else True
     config_flags_dict = {
         "expected_participants": participant_ids,
-        "share_technical_summary": payload.share_technical_summary if payload.share_technical_summary is not None else True,
+        "share_technical_summary": share_tech,
         "meet_url": payload.meet_url,
     }
     config_flags_json = json.dumps(config_flags_dict)
@@ -1656,6 +1950,13 @@ async def schedule_meeting_endpoint(payload: ScheduleMeetingPayload):
     conn.commit()
     meeting_id = cursor.lastrowid
     conn.close()
+
+    _ACTIVE_MEETING_CONFIG = {
+        "meeting_id": meeting_id,
+        "expected_participants": participant_ids,
+        "share_technical_summary": share_tech,
+        "meeting_purpose": purpose_str,
+    }
 
     job_id = f"meet_job_{meeting_id}_{int(datetime.now().timestamp())}"
     scheduler.add_job(
@@ -1677,7 +1978,7 @@ async def schedule_meeting_endpoint(payload: ScheduleMeetingPayload):
         "run_date": target_dt.isoformat(),
         "meeting_purpose": purpose_str,
         "expected_participants": participant_ids,
-        "share_technical_summary": payload.share_technical_summary,
+        "share_technical_summary": share_tech,
         "message": f"Bot successfully scheduled to join at {target_dt.isoformat()}",
     }
 
@@ -1727,6 +2028,25 @@ def intake_feed_endpoint(limit: int = 50):
     return _LIVE_INTAKE_FEED[-limit:]
 
 
+class NormalizePayload(BaseModel):
+    transcript: str
+    expected_participants: Optional[List[Any]] = None
+
+
+@app.post("/api/normalize")
+def normalize_endpoint(payload: NormalizePayload):
+    """
+    Phase 4 Dynamic Normalization inspection endpoint.
+    Rewrites any misspelled ASR aliases to their canonical user names.
+    """
+    norm = normalize_transcript_aliases(payload.transcript, payload.expected_participants)
+    return {
+        "raw_transcript": payload.transcript,
+        "normalized_transcript": norm,
+        "rewritten": norm != payload.transcript,
+    }
+
+
 @app.post("/intake")
 @app.post("/api/intake")
 async def bot_intake_endpoint(payload: IntakePayload):
@@ -1735,7 +2055,10 @@ async def bot_intake_endpoint(payload: IntakePayload):
     """
     global _LIVE_INTAKE_FEED
     raw_caption = f"{payload.speaker}: {payload.caption}" if payload.speaker else payload.caption
-    preview_mask = mask_transcript(payload.caption)["masked_text"]
+    preview_mask = mask_transcript(
+        payload.caption,
+        expected_participants=_ACTIVE_MEETING_CONFIG.get("expected_participants"),
+    )["masked_text"]
     logger.info(f"[INTAKE STREAM] RAW: {raw_caption} | MASKED PREVIEW: {preview_mask}")
     entry = {
         "timestamp": datetime.now().isoformat(),
@@ -1755,9 +2078,15 @@ def mask_endpoint(payload: TranscriptPayload):
     Performs local PII detection & tokenization, updating ephemeral RAM.
     Returns sanitized text and detected entities for the dual-pane UI.
     """
-    mask_res = mask_transcript(payload.transcript)
+    mask_res = mask_transcript(
+        payload.transcript,
+        expected_participants=payload.expected_participants,
+        normalize_aliases=True,
+    )
     return {
         "status": "success",
+        "raw_text": payload.transcript,
+        "normalized_text": mask_res.get("normalized_text", payload.transcript),
         "masked_text": mask_res["masked_text"],
         "entities_count": len(mask_res["entities_found"]),
         "detected_entities": mask_res["entities_found"],
@@ -1772,39 +2101,78 @@ def mask_endpoint(payload: TranscriptPayload):
 async def process_pipeline_endpoint(payload: TranscriptPayload, background_tasks: BackgroundTasks):
     """
     Full End-to-End Pipeline & Manual Testing Fallback:
-    1. Mask raw transcript with Presidio -> generate bracketed tokens in RAM.
-    2. Side-by-side terminal X-Ray logging (RAW vs MASKED) for zero-leak audit.
-    3. Zero-leak call to Featherless AI with ONLY masked text.
-    4. Re-hydrate structured JSON output locally using RAM map.
-    5. Persist action items in SQLite (without raw identities).
-    6. Dispatch personalized summaries via Webhook.
-    7. Aggressively wipe ephemeral RAM state.
-    8. Return dual-pane comparison payload (Cloud Payload vs. Re-hydrated Local View).
+    1. Dynamic Normalization: Rewrite ASR phonetic misspellings to canonical names BEFORE Presidio.
+    2. Dynamic Presidio Recognizer: Configure deny-list strictly targeting expected participants.
+    3. Side-by-side terminal X-Ray logging (RAW vs MASKED) for zero-leak audit.
+    4. Zero-leak call to Featherless AI with contextualized meeting_purpose & strict unknown deadline rule.
+    5. Re-hydrate structured JSON output locally using RAM map.
+    6. Persist action items in SQLite with meeting_id and resolved assignee foreign keys.
+    7. Dispatch personalized summaries via Webhook.
+    8. Aggressively wipe ephemeral RAM state.
     """
     raw_text = payload.transcript.strip()
     if not raw_text:
         raise HTTPException(status_code=400, detail="Transcript cannot be empty")
 
-    # Step 1: Masking (Zero-Leak Boundary)
-    mask_result = mask_transcript(raw_text)
+    # Determine effective meeting configuration
+    meeting_id = payload.meeting_id or _ACTIVE_MEETING_CONFIG.get("meeting_id") or 1
+    expected_participants = payload.expected_participants if payload.expected_participants is not None else _ACTIVE_MEETING_CONFIG.get("expected_participants", [])
+    share_technical_summary = payload.share_technical_summary if payload.share_technical_summary is not None else _ACTIVE_MEETING_CONFIG.get("share_technical_summary", True)
+    meeting_purpose = payload.meeting_purpose or _ACTIVE_MEETING_CONFIG.get("meeting_purpose", "AegisMeet Meeting")
+
+    # If meeting_id exists in SQLite, populate missing configs from Meetings table
+    if meeting_id:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT purpose, config_flags FROM Meetings WHERE id = ?", (meeting_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                if payload.meeting_purpose is None and row[0]:
+                    meeting_purpose = row[0]
+                if row[1]:
+                    db_flags = json.loads(row[1])
+                    if payload.expected_participants is None and "expected_participants" in db_flags:
+                        expected_participants = db_flags["expected_participants"]
+                    if payload.share_technical_summary is None and "share_technical_summary" in db_flags:
+                        share_technical_summary = db_flags["share_technical_summary"]
+        except Exception as e:
+            logger.debug(f"Could not load meeting config from DB: {e}")
+
+    # Step 1: Dynamic Normalization (ASR Misspelling Rewrite) & Dynamic Presidio Masking
+    mask_result = mask_transcript(
+        raw_text,
+        expected_participants=expected_participants,
+        normalize_aliases=True,
+    )
     masked_text = mask_result["masked_text"]
+    normalized_text = mask_result.get("normalized_text", raw_text)
     current_pii_map = get_ephemeral_ram()
 
-    # X-Ray Logging: Print side-by-side comparison to terminal for demo audits
+    # Step 2: Side-by-side terminal X-Ray logging (RAW: vs MASKED:) for demo audits
     print("\n" + "=" * 80)
     print("🛡️  [X-RAY AUDIT] ZERO-LEAK PRESIDIO COMPARISON")
     print("=" * 80)
     print(f"RAW:    {raw_text}")
+    if normalized_text != raw_text:
+        print(f"NORM:   {normalized_text}")
     print("-" * 80)
     print(f"MASKED: {masked_text}")
     print("=" * 80 + "\n", flush=True)
 
     logger.info(f"[X-RAY AUDIT] RAW: {raw_text[:120]}...")
+    if normalized_text != raw_text:
+        logger.info(f"[X-RAY AUDIT] NORM: {normalized_text[:120]}...")
     logger.info(f"[X-RAY AUDIT] MASKED: {masked_text[:120]}...")
 
-    # Step 2: Reasoning via Cloud LLM
+    # Step 3: Reasoning via Cloud LLM with contextualized prompt
     try:
-        llm_raw_output = await query_featherless_ai(masked_text)
+        llm_raw_output = await query_featherless_ai(
+            masked_text,
+            meeting_purpose=meeting_purpose,
+            share_technical_summary=share_technical_summary,
+        )
     except Exception as e:
         logger.error(f"Error querying Featherless AI: {e}")
         raise HTTPException(
@@ -1812,21 +2180,30 @@ async def process_pipeline_endpoint(payload: TranscriptPayload, background_tasks
             detail=f"Featherless AI reasoning failed: {str(e)}",
         )
 
-    # Step 3: Re-hydration (Local Proxy)
+    # Step 4: Re-hydration (Local Proxy)
     rehydrated_output = rehydrate_payload(llm_raw_output, current_pii_map)
 
-    # Step 4: Persist Tasks in SQLite
-    saved_ids = save_tasks_to_db(rehydrated_output.get("tasks", []))
+    # Enforce strict 'unknown' deadline rule across rehydrated tasks
+    for task in rehydrated_output.get("tasks", []):
+        d_val = (task.get("deadline") or "").strip()
+        if not d_val or d_val.lower() in ("none", "unspecified", "tbd", "n/a", "null"):
+            task["deadline"] = "unknown"
 
-    # Step 5 & 6: Dispatch Webhook and Wipe RAM State
+    # Step 5: Persist Tasks in SQLite with meeting_id
+    saved_ids = save_tasks_to_db(rehydrated_output.get("tasks", []), meeting_id=meeting_id)
+
+    # Step 6 & 7: Dispatch Webhook and Wipe RAM State
     await dispatch_webhooks(rehydrated_output)
     wipe_ephemeral_ram()
 
-    # Step 7: Record Cryptographic/Telemetry Audit Log
+    # Step 8: Record Cryptographic/Telemetry Audit Log
     audit_entry = {
         "id": len(AUDIT_LOGS) + 1,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "meeting_id": meeting_id,
+        "meeting_purpose": meeting_purpose,
         "raw_input_chars": len(raw_text),
+        "normalized_input_chars": len(normalized_text),
         "entities_masked_count": len(mask_result["entities_found"]),
         "detected_entity_types": list(set([e["entity_type"] for e in mask_result["entities_found"]])),
         "outbound_payload_chars": len(masked_text),
@@ -1840,20 +2217,26 @@ async def process_pipeline_endpoint(payload: TranscriptPayload, background_tasks
     # Update latest meeting result
     global _LATEST_MEETING_RESULT
     _LATEST_MEETING_RESULT = {
-        "meeting_title": "Google Meet Sync",
+        "meeting_id": meeting_id,
+        "meeting_title": meeting_purpose,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "meeting_summary": rehydrated_output.get("meeting_summary", ""),
+        "meeting_summary": rehydrated_output.get("meeting_summary", "") or rehydrated_output.get("group_view", ""),
         "key_topics": [t.get("task") for t in rehydrated_output.get("tasks", [])[:4]] or [
             "Meeting Action Items",
             "Zero-Leak Security Boundary",
             "Participant Deliverables"
         ],
         "raw_transcript_length": len(raw_text),
+        "share_technical_summary": share_technical_summary,
     }
 
-    # Step 8: Response for API and UI
+    # Step 9: Response for API and UI
     return {
         "status": "success",
+        "meeting_id": meeting_id,
+        "meeting_purpose": meeting_purpose,
+        "share_technical_summary": share_technical_summary,
+        "normalized_transcript": normalized_text,
         "intercepted_cloud_payload": {
             "endpoint": f"{FEATHERLESS_BASE_URL}/chat/completions",
             "model": FEATHERLESS_MODEL,
