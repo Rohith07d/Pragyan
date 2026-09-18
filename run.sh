@@ -30,7 +30,7 @@ trap cleanup SIGINT SIGTERM EXIT
 # Start FastAPI backend proxy
 echo "🚀 Launching Privacy Proxy Engine on http://127.0.0.1:8000 ..."
 cd "$BACKEND_DIR"
-"$BACKEND_DIR/venv/bin/uvicorn" proxy:app --host 127.0.0.1 --port 8000 &
+"$BACKEND_DIR/venv/bin/uvicorn" proxy:app --host 127.0.0.1 --port 8000 --reload &
 BACKEND_PID=$!
 
 # Wait for backend health

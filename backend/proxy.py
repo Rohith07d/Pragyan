@@ -13,6 +13,7 @@ Core FastAPI proxy orchestrating:
 import os
 import re
 import json
+import ast
 import sqlite3
 import logging
 from datetime import datetime, timezone
@@ -38,7 +39,7 @@ logger = logging.getLogger("aegismeet-proxy")
 # Configuration
 FEATHERLESS_API_KEY = os.getenv("FEATHERLESS_API_KEY", "")
 FEATHERLESS_BASE_URL = os.getenv("FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1")
-FEATHERLESS_MODEL = os.getenv("FEATHERLESS_MODEL", "meta-llama/Meta-Llama-3-70B-Instruct")
+FEATHERLESS_MODEL = os.getenv("FEATHERLESS_MODEL", "Qwen/Qwen2.5-72B-Instruct")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.getenv("DATABASE_PATH", "tasks.db"))
@@ -287,8 +288,9 @@ You receive meeting transcripts that have been sanitized: personal names and com
 
 CRITICAL DIRECTIVES:
 1. NEVER alter, translate, or invent bracketed tokens. Retain exact tokens such as [PERSON_1] as the assignee.
-2. Output STRICTLY a valid JSON object with no preamble, markdown code fences, or additional explanation.
-3. Follow this EXACT JSON schema:
+2. Output STRICTLY a valid JSON object with no preamble, markdown code fences, or conversational text.
+3. You MUST use standard double quotes (") around ALL keys and string values. NEVER use single quotes (').
+4. Follow this EXACT JSON schema:
 {
   "pm_view": "string (high-level blockers, risks, and resource dependencies)",
   "group_view": "string (core decisions, deliverables, and team milestones)",
@@ -302,6 +304,63 @@ CRITICAL DIRECTIVES:
   ]
 }
 """
+
+
+def robust_json_parse(raw_content: str) -> Dict[str, Any]:
+    """
+    Extracts and parses JSON from raw LLM output, gracefully handling:
+    - Markdown code fences (```json ... ```)
+    - Conversational preambles or postscripts
+    - Single quotes used instead of double quotes
+    - Trailing commas before closing braces/brackets
+    - Unquoted keys
+    """
+    content = raw_content.strip()
+
+    # Step 1: Strip markdown backtick code fences if present
+    content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.MULTILINE)
+    content = re.sub(r"\s*```$", "", content, flags=re.MULTILINE)
+    content = content.strip()
+
+    # Step 2: Extract substring from first { to last }
+    first_brace = content.find("{")
+    last_brace = content.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        candidate = content[first_brace : last_brace + 1]
+    else:
+        candidate = content
+
+    # Attempt A: Standard json.loads
+    try:
+        return json.loads(candidate)
+    except Exception:
+        pass
+
+    # Attempt B: Strip trailing commas
+    cleaned = re.sub(r",\s*([\]\}])", r"\1", candidate)
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    # Attempt C: ast.literal_eval for python-style dict syntax (e.g. single quotes)
+    try:
+        val = ast.literal_eval(cleaned)
+        if isinstance(val, dict):
+            return val
+    except Exception:
+        pass
+
+    # Attempt D: Replace single quotes around keys and values
+    fixed_quotes = re.sub(r"'([a-zA-Z0-9_]+)'\s*:", r'"\1":', cleaned)
+    fixed_quotes = re.sub(r":\s*'([^']*?)'([,\s\]\}])", r': "\1"\2', fixed_quotes)
+    try:
+        return json.loads(fixed_quotes)
+    except Exception:
+        pass
+
+    # Final attempt: direct json.loads on candidate to raise clear error
+    return json.loads(candidate)
 
 
 async def query_featherless_ai(sanitized_transcript: str) -> Dict[str, Any]:
@@ -326,25 +385,37 @@ async def query_featherless_ai(sanitized_transcript: str) -> Dict[str, Any]:
                 "content": f"Analyze the following sanitized meeting transcript and produce the required JSON schema:\n\n{sanitized_transcript}",
             },
         ],
+        "response_format": {"type": "json_object"},
         "temperature": 0.2,
         "max_tokens": 1500,
     }
 
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        response = await client.post(
-            f"{FEATHERLESS_BASE_URL.rstrip('/')}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-        res_json = response.json()
-        raw_content = res_json["choices"][0]["message"]["content"].strip()
+    candidate_models = [FEATHERLESS_MODEL]
+    if "14B" not in FEATHERLESS_MODEL:
+        candidate_models.append("Qwen/Qwen2.5-14B-Instruct")
 
-        # Clean any potential markdown code block fences returned by LLM
-        clean_content = re.sub(r"^```(?:json)?\s*", "", raw_content)
-        clean_content = re.sub(r"\s*```$", "", clean_content)
+    for model_name in candidate_models:
+        payload["model"] = model_name
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(
+                    f"{FEATHERLESS_BASE_URL.rstrip('/')}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                response.raise_for_status()
+                res_json = response.json()
+                raw_content = res_json["choices"][0]["message"]["content"].strip()
+                logger.info(f"Raw response from Featherless AI ({model_name}): {raw_content[:150]}...")
 
-        return json.loads(clean_content)
+                return robust_json_parse(raw_content)
+        except Exception as e:
+            logger.warning(f"Featherless AI call with {model_name} failed: {e}. Checking next fallback option.")
+
+    logger.error("All Featherless AI candidate models failed. Engaging deterministic fallback reasoning.")
+    fallback = mock_offline_reasoning(sanitized_transcript)
+    fallback["pm_view"] += " (Note: Featherless cloud response encountered error; safe local reasoning fallback engaged)"
+    return fallback
 
 
 def mock_offline_reasoning(sanitized_transcript: str) -> Dict[str, Any]:
