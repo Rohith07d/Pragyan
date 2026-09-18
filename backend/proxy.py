@@ -625,6 +625,253 @@ async def get_current_admin(current_user: dict = Depends(get_current_user)) -> d
 
 
 # ==============================================================================
+# Phase 2: Autonomous Alias Generation (Featherless AI / ASR Error Modeling)
+# ==============================================================================
+def parse_json_array(raw_content: str) -> List[str]:
+    """Extracts and parses a JSON array of strings from LLM text."""
+    content = raw_content.strip()
+    content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.MULTILINE)
+    content = re.sub(r"\s*```$", "", content, flags=re.MULTILINE).strip()
+
+    first_bracket = content.find("[")
+    last_bracket = content.rfind("]")
+    if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+        candidate = content[first_bracket : last_bracket + 1]
+    else:
+        candidate = content
+
+    try:
+        data = json.loads(candidate)
+        if isinstance(data, list):
+            return [str(x).strip() for x in data if str(x).strip()]
+    except Exception:
+        pass
+
+    try:
+        data = ast.literal_eval(candidate)
+        if isinstance(data, list):
+            return [str(x).strip() for x in data if str(x).strip()]
+    except Exception:
+        pass
+
+    # Regex fallback for quoted strings in brackets
+    matches = re.findall(r'["\']([^"\']+)["\']', candidate)
+    if matches:
+        return [m.strip() for m in matches if m.strip()]
+
+    return []
+
+
+def get_primary_name_token(name: str) -> str:
+    """Extracts the most representative name token (handling single-letter initials like 'D Rohith')."""
+    parts = [p.strip(" .") for p in name.split() if p.strip(" .")]
+    if not parts:
+        return name
+    if len(parts[0]) == 1 and len(parts) > 1:
+        return parts[1]
+    return parts[0]
+
+
+def generate_fallback_aliases(canonical_name: str) -> List[str]:
+    """
+    Deterministic phonetic alias generator simulating ASR speech-to-text errors:
+    syllable separations, vowel shifts, consonant substitutions, and trailing sound drops.
+    Guarantees at least 15 high-quality phonetic variants.
+    """
+    name = canonical_name.strip()
+    primary = get_primary_name_token(name)
+    parts = name.split()
+    rest = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+    unique_variants = []
+
+    def add_var(v: str):
+        v_clean = v.strip()
+        if (
+            v_clean
+            and v_clean.lower() != name.lower()
+            and v_clean.lower() != primary.lower()
+            and v_clean.lower() not in [x.lower() for x in unique_variants]
+        ):
+            unique_variants.append(v_clean)
+
+    # 1. Syllable splitting (space and hyphen)
+    if len(primary) > 3:
+        mid = len(primary) // 2
+        add_var(f"{primary[:mid]} {primary[mid:]}")
+        add_var(f"{primary[:mid]}-{primary[mid:]}")
+        add_var(f"{primary[:2]} {primary[2:]}")
+
+    # 2. Phonetic sound substitutions
+    phonetic_maps = [
+        ("th", "t"), ("th", "d"), ("th", "te"),
+        ("ee", "i"), ("ee", "ea"), ("i", "ee"), ("i", "y"), ("y", "i"), ("y", "ee"),
+        ("k", "c"), ("k", "ck"), ("c", "k"), ("c", "s"),
+        ("ph", "f"), ("f", "ph"),
+        ("v", "w"), ("v", "ff"), ("v", "b"), ("w", "v"),
+        ("sh", "ch"), ("ch", "sh"), ("ch", "k"),
+        ("a", "u"), ("a", "aa"), ("u", "a"), ("o", "u"), ("o", "ow"),
+        ("an", "un"), ("an", "ang"), ("am", "um"), ("am", "om"),
+        ("d", "t"), ("t", "d"), ("b", "v")
+    ]
+
+    for orig, rep in phonetic_maps:
+        if orig in primary.lower():
+            idx = primary.lower().find(orig)
+            replaced = primary[:idx] + rep + primary[idx + len(orig):]
+            add_var(replaced.title())
+
+    # 3. Trailing/leading sound truncations or consonant doublings
+    if len(primary) > 3:
+        add_var(primary[:-1])
+        add_var(primary + primary[-1])
+        add_var(primary + "h")
+        add_var(primary + "e")
+        add_var(primary + "s")
+        add_var(primary[0] + " " + primary[1:])
+
+    # 4. Multi-word name combinations
+    if rest:
+        rest_first = rest.split()[0]
+        base_list = list(unique_variants)
+        for bv in base_list[:6]:
+            add_var(f"{bv} {rest}")
+        add_var(f"{primary} {rest_first}")
+        add_var(f"{primary} {rest[:-1]}")
+
+    # 5. Guaranteed realistic phonetic padder if needed
+    suffixes = ["t", "d", "h", "n", "th", "k", "v", "y", "s", "e"]
+    vowels = ["a", "e", "i", "o", "u"]
+    idx = 0
+    while len(unique_variants) < 15:
+        suf = suffixes[idx % len(suffixes)]
+        vow = vowels[(idx // len(suffixes)) % len(vowels)]
+        cand = f"{primary[:-1]}{vow}{suf}" if len(primary) > 2 else f"{primary}{suf}"
+        add_var(cand.title())
+        idx += 1
+        if idx > 50:
+            break
+
+    return unique_variants[:15]
+
+
+async def generate_phonetic_aliases(canonical_name: str) -> List[str]:
+    """
+    Phase 2: Autonomous Alias Generation
+    Asynchronously invokes Featherless AI (Llama-3-70B) to generate 15 common phonetic misspellings,
+    transcription errors, or separated syllables that an automated speech recognition (ASR) system
+    might produce in a meeting.
+    """
+    prompt_text = (
+        f'You are an expert in speech-to-text error modeling. Given the canonical name "{canonical_name}", '
+        f'generate 15 common phonetic misspellings, transcription errors, or separated syllables that '
+        f'an automated speech recognition (ASR) system might produce in a meeting. Output strictly a JSON array of strings.'
+    )
+
+    if not FEATHERLESS_API_KEY:
+        logger.info(f"FEATHERLESS_API_KEY not configured. Generating autonomous phonetic aliases locally for '{canonical_name}'.")
+        return generate_fallback_aliases(canonical_name)
+
+    headers = {
+        "Authorization": f"Bearer {FEATHERLESS_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "meta-llama/Meta-Llama-3-70B-Instruct",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are an expert in speech-to-text error modeling. You output strictly a JSON array of strings with no conversational text.",
+            },
+            {
+                "role": "user",
+                "content": prompt_text,
+            },
+        ],
+        "temperature": 0.3,
+        "max_tokens": 500,
+    }
+
+    candidate_models = ["meta-llama/Meta-Llama-3-70B-Instruct", FEATHERLESS_MODEL, "Qwen/Qwen2.5-72B-Instruct"]
+    for model_name in candidate_models:
+        payload["model"] = model_name
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.post(
+                    f"{FEATHERLESS_BASE_URL.rstrip('/')}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                if resp.status_code == 200:
+                    raw_content = resp.json()["choices"][0]["message"]["content"].strip()
+                    raw_aliases = parse_json_array(raw_content)
+                    if len(raw_aliases) >= 5:
+                        deduped = []
+                        seen = set([canonical_name.lower()])
+                        for a in raw_aliases:
+                            clean_a = a.strip()
+                            if clean_a and clean_a.lower() not in seen:
+                                seen.add(clean_a.lower())
+                                deduped.append(clean_a)
+
+                        if len(deduped) < 15:
+                            for fb in generate_fallback_aliases(canonical_name):
+                                if fb.lower() not in seen:
+                                    seen.add(fb.lower())
+                                    deduped.append(fb)
+                                if len(deduped) >= 15:
+                                    break
+
+                        logger.info(f"Generated {len(deduped)} phonetic aliases via Featherless AI ({model_name}) for '{canonical_name}'")
+                        return deduped[:15]
+        except Exception as e:
+            logger.warning(f"Featherless AI alias generation with {model_name} failed: {e}")
+
+    logger.info(f"Featherless cloud offline or timed out; generating phonetic aliases via local fallback for '{canonical_name}'.")
+    return generate_fallback_aliases(canonical_name)
+
+
+def save_user_aliases_to_db(user_id: int, canonical_name: str, aliases: List[str]) -> List[str]:
+    """
+    Saves generated aliases into the UserAliases table linked to user_id,
+    plus the user's first name as a default alias.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    first_name = get_primary_name_token(canonical_name)
+    all_aliases = []
+
+    # 1. Primary canonical name & first name
+    for default_alias in [canonical_name, first_name]:
+        clean_d = default_alias.strip()
+        if clean_d and clean_d.lower() not in [a.lower() for a in all_aliases]:
+            all_aliases.append(clean_d)
+
+    # 2. Add generated 15 aliases
+    for a in aliases:
+        clean_a = a.strip()
+        if clean_a and clean_a.lower() not in [x.lower() for x in all_aliases]:
+            all_aliases.append(clean_a)
+
+    for alias_str in all_aliases:
+        cursor.execute(
+            "SELECT id FROM UserAliases WHERE user_id = ? AND LOWER(alias_string) = LOWER(?)",
+            (user_id, alias_str),
+        )
+        if not cursor.fetchone():
+            cursor.execute(
+                "INSERT INTO UserAliases (user_id, alias_string) VALUES (?, ?)",
+                (user_id, alias_str),
+            )
+
+    conn.commit()
+    conn.close()
+    logger.info(f"Saved {len(all_aliases)} aliases in UserAliases for user ID {user_id} ('{canonical_name}')")
+    return all_aliases
+
+
+# ==============================================================================
 # Featherless AI Client / Reasoning Layer
 # ==============================================================================
 SYSTEM_PROMPT = """You are AegisMeet Reasoning Agent, an air-gapped meeting intelligence engine.
@@ -1674,21 +1921,22 @@ async def create_user_endpoint(
     conn.commit()
     new_id = cursor.lastrowid
 
-    # Auto-add primary name as initial alias
-    cursor.execute(
-        "INSERT INTO UserAliases (user_id, alias_string) VALUES (?, ?)",
-        (new_id, canonical_name),
-    )
-    first_name = canonical_name.split()[0]
-    if first_name.lower() != canonical_name.lower():
-        cursor.execute(
-            "INSERT INTO UserAliases (user_id, alias_string) VALUES (?, ?)",
-            (new_id, first_name),
-        )
-    conn.commit()
-    conn.close()
+    # Autonomous Alias Generation (Phase 2)
+    # Wrap in robust try/except error handling so that if the AI call fails or times out, user creation does not break.
+    saved_aliases = []
+    try:
+        generated_aliases = await generate_phonetic_aliases(canonical_name)
+        saved_aliases = save_user_aliases_to_db(new_id, canonical_name, generated_aliases)
+    except Exception as e:
+        logger.error(f"Error in autonomous alias generation for '{canonical_name}': {e}. Falling back to default aliases.")
+        try:
+            fallback = generate_fallback_aliases(canonical_name)
+            saved_aliases = save_user_aliases_to_db(new_id, canonical_name, fallback)
+        except Exception as inner_e:
+            logger.error(f"Fallback alias persistence error: {inner_e}")
+            saved_aliases = save_user_aliases_to_db(new_id, canonical_name, [])
 
-    logger.info(f"Admin '{current_admin['canonical_name']}' created user '{canonical_name}' (ID: {new_id}, Role: {role})")
+    logger.info(f"Admin '{current_admin['canonical_name']}' created user '{canonical_name}' (ID: {new_id}, Role: {role}, Aliases: {len(saved_aliases)})")
 
     return {
         "status": "created",
@@ -1696,6 +1944,8 @@ async def create_user_endpoint(
             "id": new_id,
             "canonical_name": canonical_name,
             "role": role,
+            "aliases_count": len(saved_aliases),
+            "aliases": saved_aliases,
         },
     }
 
@@ -1914,6 +2164,26 @@ def get_aliases_endpoint(current_user: dict = Depends(get_current_user)):
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+class AliasGenerateRequest(BaseModel):
+    canonical_name: str
+
+
+@app.post("/api/aliases/generate")
+async def generate_aliases_endpoint(
+    payload: AliasGenerateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    On-demand endpoint to generate phonetic ASR misspellings for a given canonical name.
+    """
+    aliases = await generate_phonetic_aliases(payload.canonical_name)
+    return {
+        "canonical_name": payload.canonical_name,
+        "count": len(aliases),
+        "aliases": aliases,
+    }
 
 
 @app.patch("/api/tasks/{task_id}")
