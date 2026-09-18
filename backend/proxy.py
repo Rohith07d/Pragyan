@@ -115,8 +115,16 @@ def mask_transcript(text: str) -> Dict[str, Any]:
         entities=["PERSON", "ORGANIZATION", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER"],
     )
 
-    # Sort results backwards by start index so string slicing does not alter subsequent offsets
-    sorted_results = sorted(results, key=lambda x: x.start, reverse=True)
+    # Deduplicate overlapping spans: prioritize highest confidence score
+    sorted_by_score = sorted(results, key=lambda x: (x.score, x.end - x.start), reverse=True)
+    non_overlapping = []
+    for res in sorted_by_score:
+        # Check for overlap with already chosen spans
+        if not any(not (res.end <= kept.start or res.start >= kept.end) for kept in non_overlapping):
+            non_overlapping.append(res)
+
+    # Sort non-overlapping results backwards by start index so string slicing does not alter subsequent offsets
+    sorted_results = sorted(non_overlapping, key=lambda x: x.start, reverse=True)
 
     detected_entities = []
     masked_chars = list(text)
