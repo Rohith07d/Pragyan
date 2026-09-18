@@ -188,24 +188,31 @@ class AegisMeetBot:
                     or "No one can join a meeting unless invited" in body_text
                 )
                 if is_blocked:
-                    logger.error(
-                        "\n" + "=" * 80 + "\n"
-                        "🚨 [GOOGLE MEET ACCESS RESTRICTION DETECTED]\n"
-                        "Google Meet returned: \"You can't join this video call\"\n"
-                        "Root Cause: Anonymous guest entry is blocked by Google Meet Host Controls (Trusted/Restricted mode).\n\n"
-                        "3 WAYS TO RUN THE LIVE DEMO NOW:\n"
-                        "Option 1 (Instant Zero-Setup): Open your active Meet tab in Chrome, press Cmd+Option+I (Console), and paste:\n"
-                        "  (async()=>{const s=document.createElement('script');s.src='http://localhost:8000/aegis-meet.js';document.body.appendChild(s);})()\n"
-                        "Option 2 (Host Controls): In your active Meet window, click Host Controls (blue shield icon, bottom right) -> change Meeting Access to 'Open'.\n"
-                        "Option 3 (1-Time Sign-In): Run './backend/venv/bin/python backend/bot.py --login' to sign in once.\n"
-                        + "=" * 80 + "\n"
-                    )
-                    await self.send_intake_chunk(
-                        "System Notice",
-                        "Google Meet blocked guest bot. Run In-Tab script via Console or set Host Controls Meeting Access to 'Open'."
-                    )
-                    await self.context.close()
-                    return None
+                    if not self.headless:
+                        logger.warning("Google Meet lobby not ready or host not admitted yet. Keeping visible window open for up to 30s...")
+                        for _ in range(10):
+                            await asyncio.sleep(3)
+                            body_text = await self.page.inner_text("body")
+                            if "You can't join this video call" not in body_text and "Je kunt niet deelnemen" not in body_text:
+                                is_blocked = False
+                                break
+                    if is_blocked:
+                        logger.error(
+                            "\n" + "=" * 80 + "\n"
+                            "🚨 [GOOGLE MEET ACCESS RESTRICTION DETECTED]\n"
+                            "Google Meet returned: \"You can't join this video call\"\n"
+                            "Common Causes:\n"
+                            "1. The host is not inside the meeting yet (Google Meet shuts down the lobby when host is absent).\n"
+                            "2. The meeting URL is expired or invalid.\n"
+                            "3. Host Controls has guest entry set to Restricted/Trusted instead of Open.\n"
+                            + "=" * 80 + "\n"
+                        )
+                        await self.send_intake_chunk(
+                            "System Notice",
+                            "Google Meet lobby not accessible. Ensure host is actively in the call and Meeting Access is set to 'Open'."
+                        )
+                        await self.context.close()
+                        return None
             except Exception as e:
                 logger.debug(f"Block check error: {e}")
 
@@ -461,7 +468,7 @@ async def run_live_bot(
     duration_sec: int = 180,
     bot_name: str = "AegisMeet Notetaker",
     proxy_url: str = DEFAULT_PROXY_URL,
-    headless: bool = True,
+    headless: bool = False,
 ) -> Optional[Dict]:
     """
     Entrypoint invoked by FastAPI proxy scheduler (APScheduler) or ad-hoc /join endpoint.
@@ -482,7 +489,8 @@ async def main():
     parser.add_argument("--url", type=str, help="Google Meet URL to join")
     parser.add_argument("--name", type=str, default="AegisMeet Notetaker", help="Display name for the bot")
     parser.add_argument("--proxy-url", type=str, default=DEFAULT_PROXY_URL, help="URL of the local FastAPI proxy")
-    parser.add_argument("--headless", action="store_true", default=True, help="Run browser in headless mode")
+    parser.add_argument("--headless", action="store_true", default=False, help="Run browser in headless mode")
+    parser.add_argument("--headful", action="store_true", default=False, help="Run browser in visible mode")
     parser.add_argument("--simulate", action="store_true", help="Run simulated speech caption stream")
     parser.add_argument("--login", action="store_true", help="Open visible browser to sign into Google account once")
     parser.add_argument("--duration", type=int, default=120, help="Maximum call duration in seconds")
@@ -493,11 +501,13 @@ async def main():
         await login_flow()
         return
 
+    is_headless = args.headless and not args.headful
+
     bot = AegisMeetBot(
         meeting_url=args.url,
         bot_name=args.name,
         proxy_url=args.proxy_url,
-        headless=args.headless,
+        headless=is_headless,
     )
 
     if args.simulate or not args.url:

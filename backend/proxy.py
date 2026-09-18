@@ -568,11 +568,13 @@ class TaskResponse(BaseModel):
 
 
 async def _execute_bot_session(meet_url: str, bot_name: str = "AegisMeet Notetaker", duration_sec: int = 180):
-    """Triggers the Playwright bot headlessly."""
+    """Triggers the Playwright bot."""
     logger.info(f"Triggering Playwright bot session for: {meet_url}")
     try:
         from bot import run_live_bot
-        await run_live_bot(meet_url=meet_url, bot_name=bot_name, duration_sec=duration_sec)
+        # Set headless=False so Chrome opens visibly on Mac desktop for live Google Meet calls
+        is_mock = "mock-meet" in meet_url or meet_url.lower() in ("simulate", "test")
+        await run_live_bot(meet_url=meet_url, bot_name=bot_name, duration_sec=duration_sec, headless=is_mock)
     except Exception as e:
         logger.error(f"Error during Playwright bot session ({meet_url}): {e}")
 
