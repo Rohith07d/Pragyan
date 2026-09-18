@@ -406,7 +406,8 @@ async def login_flow():
         )
         try:
             subprocess.run([
-                mac_chrome,
+                "open", "-n", "-W", "-a", "Google Chrome",
+                "--args",
                 f"--user-data-dir={profile_dir}",
                 "--no-first-run",
                 "--no-default-browser-check",
