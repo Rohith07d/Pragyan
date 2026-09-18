@@ -33,8 +33,9 @@ const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL || "http://localhost:8000";
 
 interface AuthUser {
   id: number;
-  email: string;
-  name: string;
+  email?: string;
+  name?: string;
+  canonical_name?: string;
   role: "admin" | "user";
 }
 
@@ -139,8 +140,15 @@ export default function AegisMeetApp() {
       const saved = localStorage.getItem("aegis_auth_user");
       if (saved) {
         const parsed = JSON.parse(saved);
-        setCurrentUser(parsed);
-        setActiveProfileView(parsed.name || "Rohith");
+        const resolvedName = parsed.name || parsed.canonical_name || "User";
+        const normalizedUser: AuthUser = {
+          ...parsed,
+          name: resolvedName,
+          canonical_name: parsed.canonical_name || resolvedName,
+          email: parsed.email || `${resolvedName.toLowerCase().replace(/\s+/g, ".")}@aegismeet.internal`,
+        };
+        setCurrentUser(normalizedUser);
+        setActiveProfileView(resolvedName);
       }
     } catch (e) {
       console.error("Failed to load saved session:", e);
@@ -202,14 +210,15 @@ export default function AegisMeetApp() {
     if (currentUser) {
       fetchParticipants();
       fetchGlobalData();
+      const resolvedName = currentUser.name || currentUser.canonical_name || "Rohith";
       if (currentUser.role === "user") {
         // Regular users can only view their own profile
-        setActiveProfileView(currentUser.name);
+        setActiveProfileView(resolvedName);
         setShowTeamOverview(false);
-        setNewTaskAssignee(currentUser.name);
+        setNewTaskAssignee(resolvedName);
       } else {
         // Admin defaults to their own profile or first available
-        setNewTaskAssignee(activeProfileView);
+        setNewTaskAssignee(activeProfileView || resolvedName);
       }
     }
   }, [currentUser, fetchParticipants, fetchGlobalData, activeProfileView]);
@@ -243,12 +252,20 @@ export default function AegisMeetApp() {
         email: authEmail.trim(),
         password: authPassword.trim(),
       });
-      const user = res.data.user;
+      const rawUser = res.data.user;
+      const resolvedName = rawUser.name || rawUser.canonical_name || "User";
+      const user: AuthUser = {
+        ...rawUser,
+        name: resolvedName,
+        canonical_name: rawUser.canonical_name || resolvedName,
+        email: rawUser.email || `${resolvedName.toLowerCase().replace(/\s+/g, ".")}@aegismeet.internal`,
+      };
       setCurrentUser(user);
-      setActiveProfileView(user.name);
+      setActiveProfileView(resolvedName);
       localStorage.setItem("aegis_auth_user", JSON.stringify(user));
-      if (res.data.token) {
-        localStorage.setItem("aegis_auth_token", res.data.token);
+      const token = res.data.token || res.data.access_token;
+      if (token) {
+        localStorage.setItem("aegis_auth_token", token);
       }
     } catch (err: any) {
       setAuthError(err.response?.data?.detail || "Authentication failed. Please verify your credentials.");
@@ -268,12 +285,20 @@ export default function AegisMeetApp() {
         email: email,
         password: pass,
       });
-      const user = res.data.user;
+      const rawUser = res.data.user;
+      const resolvedName = rawUser.name || rawUser.canonical_name || "User";
+      const user: AuthUser = {
+        ...rawUser,
+        name: resolvedName,
+        canonical_name: rawUser.canonical_name || resolvedName,
+        email: rawUser.email || `${resolvedName.toLowerCase().replace(/\s+/g, ".")}@aegismeet.internal`,
+      };
       setCurrentUser(user);
-      setActiveProfileView(user.name);
+      setActiveProfileView(resolvedName);
       localStorage.setItem("aegis_auth_user", JSON.stringify(user));
-      if (res.data.token) {
-        localStorage.setItem("aegis_auth_token", res.data.token);
+      const token = res.data.token || res.data.access_token;
+      if (token) {
+        localStorage.setItem("aegis_auth_token", token);
       }
     } catch (err: any) {
       setAuthError(err.response?.data?.detail || "Demo sign-in failed.");
@@ -610,7 +635,7 @@ export default function AegisMeetApp() {
               <p className="text-xs text-slate-400 hidden sm:block">
                 {isAdmin
                   ? "Admin View: Full team monitoring & cross-functional workspace"
-                  : `Personalized Meeting Portal for ${currentUser.name}`}
+                  : `Personalized Meeting Portal for ${currentUser.name || currentUser.canonical_name || "User"}`}
               </p>
             </div>
           </div>
@@ -673,14 +698,14 @@ export default function AegisMeetApp() {
             <div className="flex items-center gap-2.5 pl-2 border-l border-slate-800">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-xs">
-                  {currentUser.name.charAt(0).toUpperCase()}
+                  {(currentUser.name || currentUser.canonical_name || "U").charAt(0).toUpperCase()}
                 </div>
                 <div className="hidden md:block text-left">
                   <div className="text-xs font-bold text-white leading-tight">
-                    {currentUser.name}
+                    {currentUser.name || currentUser.canonical_name || "User"}
                   </div>
                   <div className="text-[10px] text-slate-400 leading-tight">
-                    {currentUser.email}
+                    {currentUser.email || `${(currentUser.name || currentUser.canonical_name || "user").toLowerCase().replace(/\s+/g, ".")}@aegismeet.internal`}
                   </div>
                 </div>
               </div>

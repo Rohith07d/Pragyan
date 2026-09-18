@@ -2306,9 +2306,12 @@ def login_endpoint(payload: LoginRequest):
     return {
         "access_token": token,
         "token_type": "bearer",
+        "token": token,
         "user": {
             "id": user_dict["id"],
             "canonical_name": user_dict["canonical_name"],
+            "name": user_dict["canonical_name"],
+            "email": f"{user_dict['canonical_name'].lower().replace(' ', '.')}@aegismeet.internal",
             "role": user_dict["role"],
         },
     }
