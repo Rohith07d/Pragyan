@@ -18,6 +18,7 @@ import json
 import asyncio
 import logging
 import argparse
+import subprocess
 from typing import Optional, List, Dict
 import httpx
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -40,6 +41,17 @@ SIMULATION_SCRIPT = [
     {"speaker": "Sambhav Chordia", "text": "I will finalize the Next.js dual-pane dashboard by tomorrow at 5:00 PM."},
     {"speaker": "Mayank Sachdeva", "text": "Agreed. Rohith, please verify the webhook dispatch and SQLite task logging before next Friday."},
 ]
+
+
+def cleanup_profile_locks(profile_dir: str):
+    """Removes stale Chromium SingletonLock files to prevent profile lock crashes."""
+    for lock_name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        lock_path = os.path.join(profile_dir, lock_name)
+        if os.path.exists(lock_path) or os.path.islink(lock_path):
+            try:
+                os.unlink(lock_path)
+            except Exception:
+                pass
 
 
 class AegisMeetBot:
@@ -137,6 +149,7 @@ class AegisMeetBot:
 
             profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_profile")
             os.makedirs(profile_dir, exist_ok=True)
+            cleanup_profile_locks(profile_dir)
 
             # Attempt to use local Google Chrome if available for maximum authenticity
             launch_kwargs = {
@@ -375,10 +388,37 @@ class AegisMeetBot:
 
 
 async def login_flow():
-    """Opens a visible Chromium window for one-time Google Account sign-in."""
+    """Opens a visible browser window for one-time Google Account sign-in."""
     profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot_profile")
     os.makedirs(profile_dir, exist_ok=True)
-    logger.info("Opening visible Chromium browser. Sign into your Google account...")
+    cleanup_profile_locks(profile_dir)
+
+    mac_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if os.path.exists(mac_chrome):
+        logger.info(
+            "\n" + "=" * 80 + "\n"
+            "🌐 [OPENING GOOGLE CHROME FOR SIGN-IN]\n"
+            "A Google Chrome window is opening on your desktop.\n"
+            "1. Sign into your Google account in that Chrome window.\n"
+            "2. Once signed in, simply CLOSE the Chrome window.\n"
+            "Your authenticated session will be saved for the bot.\n"
+            + "=" * 80 + "\n"
+        )
+        try:
+            subprocess.run([
+                mac_chrome,
+                f"--user-data-dir={profile_dir}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "https://accounts.google.com/signin",
+            ])
+            cleanup_profile_locks(profile_dir)
+            logger.info("✅ Google session successfully saved to .bot_profile!")
+            return
+        except Exception as e:
+            logger.warning(f"Native Chrome launch encountered ({e}); falling back to Playwright...")
+
+    logger.info("Opening visible browser via Playwright. Sign into your Google account...")
     async with async_playwright() as p:
         login_args = [
             "--use-fake-ui-for-media-stream",
@@ -411,7 +451,8 @@ async def login_flow():
                 await asyncio.sleep(2)
         except Exception:
             pass
-        logger.info("Login session successfully saved to .bot_profile!")
+        cleanup_profile_locks(profile_dir)
+        logger.info("✅ Login session successfully saved to .bot_profile!")
 
 
 async def run_live_bot(
