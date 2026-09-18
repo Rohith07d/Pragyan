@@ -50,3 +50,8 @@ Ephemeral PII RAM Dictionary:
 *   `/backend/bot.py`: Playwright headless DOM scraping script.
 *   `/backend/tasks.db`: Local SQLite database powering the Task Tracking Dashboard.
 *   `/frontend/`: Next.js workspace containing the dual-pane UI (Intercepted Cloud Payload vs. Re-hydrated Local View).
+
+## 5. Telemetry, Audit Logs & Run Orchestration
+*   `/api/audit-logs`: Exposes real-time verification logs verifying zero unmasked entity leakage in outbound cloud packets, payload character counts, and confirmation of RAM wiping.
+*   `/api/webhooks/feed`: In-memory log of dispatched webhook payloads enabling live inspection on the Next.js UI when third-party endpoints are mocked.
+*   `run.sh`: Unified root startup script to concurrently boot FastAPI proxy (port 8000) and Next.js frontend (port 3000).

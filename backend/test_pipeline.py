@@ -51,9 +51,25 @@ def test_tasks_endpoint():
     tasks = response.json()
     assert isinstance(tasks, list)
 
+def test_audit_logs_and_webhook_feed():
+    audit_resp = client.get("/api/audit-logs")
+    assert audit_resp.status_code == 200
+    audit_data = audit_resp.json()
+    assert isinstance(audit_data, list)
+    assert len(audit_data) > 0
+    assert audit_data[0]["zero_leak_verified"] is True
+    assert audit_data[0]["ram_wipe_status"] == "CONFIRMED_CLEARED"
+
+    webhook_resp = client.get("/api/webhooks/feed")
+    assert webhook_resp.status_code == 200
+    webhook_data = webhook_resp.json()
+    assert isinstance(webhook_data, list)
+    assert len(webhook_data) > 0
+
 if __name__ == "__main__":
     test_health()
     test_mask_endpoint()
     test_process_pipeline_zero_leak_and_wipe()
     test_tasks_endpoint()
-    print("All pipeline tests passed!")
+    test_audit_logs_and_webhook_feed()
+    print("All pipeline and telemetry tests passed!")

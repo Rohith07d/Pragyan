@@ -21,6 +21,10 @@ import {
   Radio,
   FileText,
   Sparkles,
+  History,
+  Activity,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 
 const PROXY_URL = process.env.NEXT_PUBLIC_PROXY_URL || "http://localhost:8000";
@@ -52,6 +56,28 @@ interface ProcessResult {
   };
   saved_task_ids: number[];
   ram_wiped: boolean;
+  audit_id?: number;
+}
+
+interface AuditEntry {
+  id: number;
+  timestamp: string;
+  raw_input_chars: number;
+  entities_masked_count: number;
+  detected_entity_types: string[];
+  outbound_payload_chars: number;
+  outbound_target: string;
+  outbound_model: string;
+  zero_leak_verified: boolean;
+  ram_wipe_status: string;
+}
+
+interface WebhookEntry {
+  id: number;
+  timestamp: string;
+  targets: string[];
+  payload: string;
+  status: string;
 }
 
 const SAMPLE_TRANSCRIPTS = [
@@ -81,6 +107,12 @@ export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<"pm" | "group" | "absent" | "tasks">("pm");
   const [maskPreview, setMaskPreview] = useState<any>(null);
 
+  // Telemetry & Feed state
+  const [auditLogs, setAuditLogs] = useState<AuditEntry[]>([]);
+  const [webhookFeed, setWebhookFeed] = useState<WebhookEntry[]>([]);
+  const [showAuditLogs, setShowAuditLogs] = useState<boolean>(false);
+  const [showWebhookFeed, setShowWebhookFeed] = useState<boolean>(false);
+
   // Health & Task Polling
   const checkHealth = async () => {
     try {
@@ -101,12 +133,34 @@ export default function Dashboard() {
     }
   };
 
+  const fetchAuditLogs = async () => {
+    try {
+      const res = await axios.get(`${PROXY_URL}/api/audit-logs`, { timeout: 4000 });
+      setAuditLogs(res.data);
+    } catch (e) {
+      console.debug("Failed to fetch audit logs:", e);
+    }
+  };
+
+  const fetchWebhookFeed = async () => {
+    try {
+      const res = await axios.get(`${PROXY_URL}/api/webhooks/feed`, { timeout: 4000 });
+      setWebhookFeed(res.data);
+    } catch (e) {
+      console.debug("Failed to fetch webhook feed:", e);
+    }
+  };
+
   useEffect(() => {
     checkHealth();
     fetchTasks();
+    fetchAuditLogs();
+    fetchWebhookFeed();
     const interval = setInterval(() => {
       checkHealth();
       fetchTasks();
+      fetchAuditLogs();
+      fetchWebhookFeed();
     }, 8000);
     return () => clearInterval(interval);
   }, []);
@@ -132,6 +186,8 @@ export default function Dashboard() {
       setResult(res.data);
       setMaskPreview(null);
       await fetchTasks();
+      await fetchAuditLogs();
+      await fetchWebhookFeed();
       await checkHealth();
     } catch (e: any) {
       alert(`Pipeline execution failed: ${e.response?.data?.detail || e.message}`);
@@ -171,7 +227,7 @@ export default function Dashboard() {
         console.debug("Intake stream notification:", err);
       }
 
-      await new Promise((r) => setTimeout(r, 700));
+      await new Promise((r) => setTimeout(r, 650));
     }
 
     setIsSimulating(false);
@@ -183,6 +239,8 @@ export default function Dashboard() {
       const res = await axios.post(`${PROXY_URL}/api/process`, { transcript: accumulated });
       setResult(res.data);
       await fetchTasks();
+      await fetchAuditLogs();
+      await fetchWebhookFeed();
       await checkHealth();
     } catch (e: any) {
       alert(`Simulation processing failed: ${e.response?.data?.detail || e.message}`);
@@ -348,7 +406,7 @@ export default function Dashboard() {
           </div>
         </section>
 
-        {/* PII Mask Preview Modal/Drawer (if Inspect Masking clicked) */}
+        {/* PII Mask Preview Drawer */}
         {maskPreview && !result && (
           <section className="bg-slate-900 border border-cyan-800/50 rounded-2xl p-6 shadow-xl animate-fade-in">
             <div className="flex items-center justify-between mb-3">
@@ -606,6 +664,94 @@ export default function Dashboard() {
               </span>
               <span>RAM Auto-Wipe: Enabled</span>
             </div>
+          </div>
+        </div>
+
+        {/* TELEMETRY & AUDIT PANELS */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* Zero-Leak Security Audit Log */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center space-x-2">
+                <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-base font-semibold text-white">Zero-Leak Cryptographic Audit Log</h3>
+              </div>
+              <button
+                onClick={() => setShowAuditLogs(!showAuditLogs)}
+                className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center space-x-1 font-medium"
+              >
+                <span>{showAuditLogs ? "Collapse" : "Expand Logs"}</span>
+                {showAuditLogs ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+            <p className="text-xs text-slate-400 mb-4">
+              Verifiable network telemetry proving that all outbound HTTP packets contain 0 raw identities.
+            </p>
+
+            {auditLogs.length === 0 ? (
+              <div className="py-6 text-center text-xs text-slate-500 border border-dashed border-slate-800 rounded-xl">
+                No audit logs recorded yet. Execute the pipeline to generate telemetry.
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+                {(showAuditLogs ? auditLogs : auditLogs.slice(0, 2)).map((log) => (
+                  <div key={log.id} className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-indigo-400 font-semibold">Audit #{log.id}</span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-950 text-emerald-400 border border-emerald-800">
+                        {log.zero_leak_verified ? "ZERO LEAK VERIFIED" : "UNVERIFIED"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-400 font-mono">
+                      <div>Masked: <span className="text-slate-200">{log.entities_masked_count} entities</span></div>
+                      <div>RAM Wipe: <span className="text-emerald-400">{log.ram_wipe_status}</span></div>
+                      <div>Target: <span className="text-slate-200">{log.outbound_model.split("/").pop()}</span></div>
+                      <div>Timestamp: <span className="text-slate-500">{new Date(log.timestamp).toLocaleTimeString()}</span></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Real-time Webhook Dispatch Feed */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center space-x-2">
+                <Activity className="w-5 h-5 text-cyan-400" />
+                <h3 className="text-base font-semibold text-white">Live Webhook Dispatch Stream</h3>
+              </div>
+              <button
+                onClick={() => setShowWebhookFeed(!showWebhookFeed)}
+                className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center space-x-1 font-medium"
+              >
+                <span>{showWebhookFeed ? "Collapse" : "Expand Stream"}</span>
+                {showWebhookFeed ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+            <p className="text-xs text-slate-400 mb-4">
+              Observes recent payloads pushed to external team messaging endpoints (Discord / Slack).
+            </p>
+
+            {webhookFeed.length === 0 ? (
+              <div className="py-6 text-center text-xs text-slate-500 border border-dashed border-slate-800 rounded-xl">
+                No webhooks dispatched yet. Run pipeline or simulation to see broadcasts.
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+                {(showWebhookFeed ? webhookFeed : webhookFeed.slice(0, 2)).map((item) => (
+                  <div key={item.id} className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-cyan-300">{item.targets.join(", ")}</span>
+                      <span className="text-[10px] text-emerald-400 font-mono">{item.status}</span>
+                    </div>
+                    <div className="p-2 bg-slate-900 rounded border border-slate-800 font-mono text-[11px] text-slate-300 whitespace-pre-wrap max-h-24 overflow-y-auto">
+                      {item.payload}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
