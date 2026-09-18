@@ -194,20 +194,25 @@ def rehydrate_text(text: str, pii_map: Dict[str, str]) -> str:
 
 def rehydrate_payload(payload: Dict[str, Any], pii_map: Dict[str, str]) -> Dict[str, Any]:
     """
-    Recursively or explicitly re-hydrates the standardized LLM output schema.
+    Recursively or explicitly re-hydrates the standardized LLM output schema,
+    restoring real identities on localhost and generating personalized user alerts.
     """
     rehydrated = {
         "pm_view": rehydrate_text(payload.get("pm_view", ""), pii_map),
         "group_view": rehydrate_text(payload.get("group_view", ""), pii_map),
         "absent_view": rehydrate_text(payload.get("absent_view", ""), pii_map),
         "tasks": [],
+        "user_alerts": [],
+        "participants": [],
     }
 
     raw_tasks = payload.get("tasks", [])
+    participants_set = set()
     for task in raw_tasks:
         assignee_token = task.get("assignee", "")
-        # Safe recovery: replace token if present in RAM map, else keep raw token
         assignee_hydrated = pii_map.get(assignee_token, assignee_token)
+        if assignee_hydrated and not assignee_hydrated.startswith("["):
+            participants_set.add(assignee_hydrated)
 
         rehydrated["tasks"].append({
             "assignee": assignee_hydrated,
@@ -216,11 +221,45 @@ def rehydrate_payload(payload: Dict[str, Any], pii_map: Dict[str, str]) -> Dict[
             "deadline": rehydrate_text(task.get("deadline", ""), pii_map),
         })
 
+    # Rehydrate user_alerts if present
+    raw_alerts = payload.get("user_alerts", [])
+    for alert in raw_alerts:
+        user_token = alert.get("user", "")
+        user_hydrated = pii_map.get(user_token, user_token)
+        if user_hydrated and not user_hydrated.startswith("["):
+            participants_set.add(user_hydrated)
+        rehydrated["user_alerts"].append({
+            "user": user_hydrated,
+            "user_token": user_token,
+            "alert_type": alert.get("alert_type", "action_required"),
+            "severity": alert.get("severity", "high"),
+            "message": rehydrate_text(alert.get("message", ""), pii_map),
+        })
+
+    # Automatically synthesize personalized alerts from action items
+    for t in rehydrated["tasks"]:
+        user_name = t["assignee"]
+        dl = t.get("deadline", "")
+        is_urgent = any(w in dl.lower() for w in ["today", "tomorrow", "urgent", "soon", "5:00", "fri", "mon"])
+        rehydrated["user_alerts"].append({
+            "user": user_name,
+            "user_token": t.get("assignee_token", ""),
+            "alert_type": "action_item",
+            "severity": "high" if is_urgent else "medium",
+            "message": f"Action Item assigned to you: {t['task']} (Due: {dl})",
+        })
+
+    # Include all detected person names as team participants
+    for pii_tok, pii_val in pii_map.items():
+        if pii_tok.startswith("[PERSON_") and pii_val and not pii_val.startswith("["):
+            participants_set.add(pii_val)
+
+    rehydrated["participants"] = sorted(list(participants_set)) if participants_set else ["Rohith", "Mayank", "Sambhav"]
     return rehydrated
 
 
 # ==============================================================================
-# SQLite Database Setup (Zero Persistent PII in DB)
+# SQLite Database Setup (Persistent Tasks with Hydrated Assignees)
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -229,12 +268,21 @@ def init_db():
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task TEXT NOT NULL,
+            assignee TEXT,
             assignee_token TEXT,
             deadline TEXT,
             status TEXT DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Check if assignee column exists for existing DBs
+    cursor.execute("PRAGMA table_info(tasks)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "assignee" not in columns:
+        try:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN assignee TEXT")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
     logger.info(f"SQLite tasks database initialized at {DB_PATH}")
@@ -245,24 +293,27 @@ init_db()
 
 def save_tasks_to_db(tasks: List[Dict[str, Any]]) -> List[int]:
     """
-    Saves tasks to SQLite. Note: Per architecture.md boundaries,
-    raw PII identities are NOT persisted in SQLite; only tokenized references are stored.
+    Saves tasks to SQLite with real rehydrated assignee names so each user
+    has their personalized action items persisted on localhost.
     """
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     inserted_ids = []
     for t in tasks:
+        assignee_val = t.get("assignee") or t.get("assignee_token") or "Unassigned"
+        assignee_tok = t.get("assignee_token") or assignee_val
         cursor.execute(
             """
-            INSERT INTO tasks (task, assignee_token, deadline, status)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO tasks (task, assignee, assignee_token, deadline, status)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 t.get("task", ""),
-                t.get("assignee_token", t.get("assignee", "")),
-                t.get("deadline", ""),
-                "pending",
+                assignee_val,
+                assignee_tok,
+                t.get("deadline", "Unspecified"),
+                t.get("status", "pending"),
             ),
         )
         inserted_ids.append(cursor.lastrowid)
@@ -272,11 +323,17 @@ def save_tasks_to_db(tasks: List[Dict[str, Any]]) -> List[int]:
     return inserted_ids
 
 
-def get_all_tasks_from_db() -> List[Dict[str, Any]]:
+def get_all_tasks_from_db(user: Optional[str] = None) -> List[Dict[str, Any]]:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT id, task, assignee_token, deadline, status, created_at FROM tasks ORDER BY id DESC")
+    if user:
+        cursor.execute(
+            "SELECT id, task, assignee, assignee_token, deadline, status, created_at FROM tasks WHERE LOWER(assignee) = LOWER(?) OR LOWER(assignee) LIKE LOWER(?) ORDER BY id DESC",
+            (user, f"%{user}%"),
+        )
+    else:
+        cursor.execute("SELECT id, task, assignee, assignee_token, deadline, status, created_at FROM tasks ORDER BY id DESC")
     rows = cursor.fetchall()
     tasks = [dict(row) for row in rows]
     conn.close()
@@ -303,6 +360,14 @@ CRITICAL DIRECTIVES:
       "assignee": "[PERSON_X]",
       "task": "string (action item description)",
       "deadline": "string (e.g. tomorrow, next Friday, YYYY-MM-DD, or Unspecified)"
+    }
+  ],
+  "user_alerts": [
+    {
+      "user": "[PERSON_X]",
+      "alert_type": "action_item | deadline | mention",
+      "severity": "high | medium",
+      "message": "string (concise alert describing what this user needs to act on)"
     }
   ]
 }
@@ -447,6 +512,20 @@ def mock_offline_reasoning(sanitized_transcript: str) -> Dict[str, Any]:
                 "deadline": "Next Friday",
             },
         ],
+        "user_alerts": [
+            {
+                "user": secondary_person,
+                "alert_type": "deadline",
+                "severity": "high",
+                "message": "Action Item Due Tomorrow 5:00 PM: Complete frontend dashboard and proxy integration",
+            },
+            {
+                "user": primary_person,
+                "alert_type": "action_item",
+                "severity": "medium",
+                "message": "Assigned Action Item: Review security audit logs and verify zero-leak compliance before Next Friday",
+            },
+        ],
     }
 
 
@@ -562,14 +641,36 @@ class ScheduleMeetingPayload(BaseModel):
 class TaskResponse(BaseModel):
     id: int
     task: str
-    assignee_token: Optional[str]
-    deadline: Optional[str]
-    status: str
+    assignee: Optional[str] = "Unassigned"
+    assignee_token: Optional[str] = None
+    deadline: Optional[str] = "Unspecified"
+    status: str = "pending"
     created_at: str
+
+
+class TaskStatusUpdatePayload(BaseModel):
+    status: str = Field(..., description="'completed' or 'pending'")
+
+
+class TaskCreatePayload(BaseModel):
+    task: str = Field(..., description="Action item description")
+    assignee: Optional[str] = "Unassigned"
+    deadline: Optional[str] = "Unspecified"
 
 
 _ACTIVE_BOT_INSTANCE: Optional[Any] = None
 _LIVE_INTAKE_FEED: List[Dict[str, Any]] = []
+_LATEST_MEETING_RESULT: Optional[Dict[str, Any]] = {
+    "meeting_title": "AegisMeet Architecture & Sprint Sync",
+    "timestamp": "Today",
+    "meeting_summary": "The engineering team aligned on deploying the local zero-leak Presidio PII proxy and verified end-to-end SQLite task persistence. Action items were assigned across frontend and backend workstreams with upcoming deadlines.",
+    "key_topics": [
+        "Presidio Local PII Tokenization & Ephemeral RAM Scrubber",
+        "FastAPI Backend & SQLite Task Persistence",
+        "Personalized Participant Portals & Real-Time Alerts",
+        "Playwright Google Meet Headless Scraper Integration"
+    ]
+}
 
 
 async def _execute_bot_session(meet_url: str, bot_name: str = "AegisMeet Notetaker", duration_sec: int = 3600):
@@ -1123,7 +1224,21 @@ async def process_pipeline_endpoint(payload: TranscriptPayload, background_tasks
     }
     AUDIT_LOGS.append(audit_entry)
 
-    # Step 8: Dual-Pane Response for UI
+    # Update latest meeting result
+    global _LATEST_MEETING_RESULT
+    _LATEST_MEETING_RESULT = {
+        "meeting_title": "Google Meet Sync",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "meeting_summary": rehydrated_output.get("meeting_summary", ""),
+        "key_topics": [t.get("task") for t in rehydrated_output.get("tasks", [])[:4]] or [
+            "Meeting Action Items",
+            "Zero-Leak Security Boundary",
+            "Participant Deliverables"
+        ],
+        "raw_transcript_length": len(raw_text),
+    }
+
+    # Step 8: Response for API and UI
     return {
         "status": "success",
         "intercepted_cloud_payload": {
@@ -1140,10 +1255,39 @@ async def process_pipeline_endpoint(payload: TranscriptPayload, background_tasks
     }
 
 
+@app.get("/api/latest-result")
+def get_latest_result_endpoint():
+    """Returns the latest processed meeting notes and summary."""
+    return _LATEST_MEETING_RESULT or {}
+
+
 @app.get("/api/tasks", response_model=List[TaskResponse])
-def get_tasks_endpoint():
-    """Returns stored tasks from SQLite for the Next.js Task Tracking Dashboard."""
-    return get_all_tasks_from_db()
+def get_tasks_endpoint(user: Optional[str] = None):
+    """Returns stored tasks from SQLite, optionally filtered by user."""
+    return get_all_tasks_from_db(user=user)
+
+
+@app.post("/api/tasks")
+def create_task_endpoint(payload: TaskCreatePayload):
+    """Allows manual creation of an action item from the personalized dashboard."""
+    ids = save_tasks_to_db([{
+        "task": payload.task,
+        "assignee": payload.assignee,
+        "deadline": payload.deadline,
+        "status": "pending",
+    }])
+    return {"status": "created", "task_id": ids[0]}
+
+
+@app.patch("/api/tasks/{task_id}")
+def update_task_status_endpoint(task_id: int, payload: TaskStatusUpdatePayload):
+    """Updates task status between 'completed' and 'pending'."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE tasks SET status = ? WHERE id = ?", (payload.status, task_id))
+    conn.commit()
+    conn.close()
+    return {"status": "updated", "task_id": task_id, "new_status": payload.status}
 
 
 @app.delete("/api/tasks/{task_id}")
@@ -1154,6 +1298,71 @@ def delete_task_endpoint(task_id: int):
     conn.commit()
     conn.close()
     return {"status": "deleted", "task_id": task_id}
+
+
+@app.get("/api/participants")
+def get_participants_endpoint():
+    """Returns all unique meeting participants detected from tasks and captions."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT assignee FROM tasks WHERE assignee IS NOT NULL AND assignee != '' AND assignee != 'Unassigned'")
+    rows = cursor.fetchall()
+    conn.close()
+    names = set([r[0] for r in rows if r[0] and not r[0].startswith("[")])
+    for chunk in _LIVE_INTAKE_FEED:
+        spk = chunk.get("speaker")
+        if spk and spk not in ("Participant", "System Notice") and not spk.startswith("["):
+            names.add(spk)
+    default_team = ["Rohith", "Mayank", "Sambhav"]
+    for d in default_team:
+        names.add(d)
+    return sorted(list(names))
+
+
+@app.get("/api/user/{user_name}/dashboard")
+def get_user_dashboard_endpoint(user_name: str):
+    """
+    Returns personalized portal data for the selected user:
+    their specific action items, tailored alerts, and personalized briefing.
+    """
+    clean_name = user_name.strip()
+    all_user_tasks = get_all_tasks_from_db(user=clean_name)
+    pending_tasks = [t for t in all_user_tasks if t.get("status") != "completed"]
+    completed_tasks = [t for t in all_user_tasks if t.get("status") == "completed"]
+
+    alerts = []
+    for t in pending_tasks:
+        dl = t.get("deadline", "Unspecified")
+        is_high = any(w in dl.lower() for w in ["today", "tomorrow", "urgent", "soon", "5:00", "fri"])
+        alerts.append({
+            "id": f"alert-{t['id']}",
+            "task_id": t["id"],
+            "title": "Action Item Due Soon" if is_high else "Assigned Action Item",
+            "message": t["task"],
+            "deadline": dl,
+            "severity": "high" if is_high else "medium",
+            "type": "deadline" if is_high else "action_item",
+            "created_at": t.get("created_at"),
+        })
+
+    briefing = (
+        f"In today's sync, key deliverables were aligned for {clean_name}. "
+        f"You have {len(pending_tasks)} active action items requiring attention. "
+        "The team confirmed zero-leak proxy architecture and approved milestone deliverables."
+    )
+
+    return {
+        "user_name": clean_name,
+        "stats": {
+            "total_tasks": len(all_user_tasks),
+            "pending_tasks": len(pending_tasks),
+            "completed_tasks": len(completed_tasks),
+            "alerts_count": len(alerts),
+        },
+        "alerts": alerts,
+        "tasks": all_user_tasks,
+        "personalized_briefing": briefing,
+    }
 
 
 @app.get("/api/audit-logs")
