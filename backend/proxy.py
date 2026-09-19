@@ -1916,6 +1916,7 @@ class MeetingCreateRequest(BaseModel):
     scheduled_time: Optional[str] = Field("Today", description="Scheduled meeting time")
     config_flags: Optional[Dict[str, Any]] = Field(None, description="Dynamic flags such as expected_participants")
     project_id: Optional[int] = Field(None, description="Mandatory foreign key to Projects(id)")
+    attendees: Optional[List[Any]] = Field(None, description="List of attendee user IDs or names")
 
 
 class AuthLoginPayload(BaseModel):
@@ -3168,64 +3169,92 @@ def get_auth_users_endpoint(current_user: dict = Depends(get_current_user)):
 @app.get("/tasks")
 @app.get("/api/tasks")
 def get_tasks_endpoint(
-    meeting_id: Optional[int] = None,
     project_id: Optional[int] = None,
+    meeting_id: Optional[int] = None,
     user_id: Optional[int] = None,
     user: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
     """
     Strict Project & Privacy Filtering:
-    - Performs SQL JOIN on ProjectMembers to strictly return only tasks linked to projects the requesting user is a member of.
-    - Normal user: Strictly filters by authenticated user's ID (ignoring any requested user_id).
-    - Admin: Can view all tasks across authorized projects or filter by user_id/user/project_id/meeting_id.
+    - 1. Zero-Trust Check: If project_id provided, physically verifies that the requesting user is in that project.
+    - 2. Strict Return: ONLY fetch tasks matching this specific project_id.
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    query = """
-        SELECT t.id, t.meeting_id, t.project_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
-               u.canonical_name as assignee, p.name as project_name
-        FROM Tasks t
-        INNER JOIN ProjectMembers pm ON pm.project_id = t.project_id AND pm.user_id = ?
-        LEFT JOIN Projects p ON p.id = t.project_id
-        LEFT JOIN Users u ON u.id = t.assignee_id
-    """
-    conditions = []
-    params = [current_user["id"]]
+    if project_id is not None:
+        # 1. Zero-Trust Check: Is the user in this project?
+        is_member = cursor.execute("""
+            SELECT 1 FROM ProjectMembers WHERE user_id = ? AND project_id = ?
+        """, (current_user["id"], project_id)).fetchone()
 
-    if current_user["role"] != "admin":
-        # Strict privacy enforcement: non-admins ONLY see their own tasks
-        conditions.append("t.assignee_id = ?")
-        params.append(current_user["id"])
-    else:
-        # Admin can view all tasks in authorized projects or filter
-        if user_id:
-            conditions.append("t.assignee_id = ?")
+        if not is_member:
+            conn.close()
+            raise HTTPException(status_code=403, detail="Unauthorized: You do not have access to this workspace.")
+
+        # 2. Strict Return: ONLY fetch tasks matching this specific project_id
+        query = """
+            SELECT t.id, t.meeting_id, t.project_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+                   u.canonical_name as assignee, p.name as project_name
+            FROM Tasks t
+            LEFT JOIN Projects p ON p.id = t.project_id
+            LEFT JOIN Users u ON u.id = t.assignee_id
+            WHERE t.project_id = ?
+        """
+        params = [project_id]
+        if meeting_id is not None:
+            query += " AND t.meeting_id = ?"
+            params.append(meeting_id)
+        if user_id is not None:
+            query += " AND t.assignee_id = ?"
             params.append(user_id)
-        elif user:
-            conditions.append("(LOWER(u.canonical_name) = LOWER(?) OR LOWER(u.canonical_name) LIKE LOWER(?))")
+        elif user is not None:
+            query += " AND (LOWER(u.canonical_name) = LOWER(?) OR LOWER(u.canonical_name) LIKE LOWER(?))"
             params.extend([user, f"%{user}%"])
 
-    if project_id:
-        conditions.append("t.project_id = ?")
-        params.append(project_id)
+        query += " ORDER BY t.id DESC"
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        tasks = [dict(r) for r in rows]
+        conn.close()
+        return tasks
+    else:
+        query = """
+            SELECT t.id, t.meeting_id, t.project_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+                   u.canonical_name as assignee, p.name as project_name
+            FROM Tasks t
+            INNER JOIN ProjectMembers pm ON pm.project_id = t.project_id AND pm.user_id = ?
+            LEFT JOIN Projects p ON p.id = t.project_id
+            LEFT JOIN Users u ON u.id = t.assignee_id
+        """
+        conditions = []
+        params = [current_user["id"]]
 
-    if meeting_id:
-        conditions.append("t.meeting_id = ?")
-        params.append(meeting_id)
+        if current_user["role"] != "admin":
+            # Strict privacy enforcement: non-admins ONLY see their own tasks when project_id is omitted
+            conditions.append("t.assignee_id = ?")
+            params.append(current_user["id"])
+        else:
+            if user_id is not None:
+                conditions.append("t.assignee_id = ?")
+                params.append(user_id)
+            elif user is not None:
+                conditions.append("(LOWER(u.canonical_name) = LOWER(?) OR LOWER(u.canonical_name) LIKE LOWER(?))")
+                params.extend([user, f"%{user}%"])
 
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-
-    query += " ORDER BY t.id DESC"
-
-    cursor.execute(query, tuple(params))
-    rows = cursor.fetchall()
-    tasks = [dict(r) for r in rows]
-    conn.close()
-    return tasks
+        if meeting_id is not None:
+            conditions.append("t.meeting_id = ?")
+            params.append(meeting_id)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY t.id DESC"
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        tasks = [dict(r) for r in rows]
+        conn.close()
+        return tasks
 
 
 @app.post("/tasks", status_code=status.HTTP_201_CREATED)
@@ -3434,6 +3463,45 @@ def get_single_meeting_endpoint(
     return m_dict
 
 
+@app.get("/projects/{project_id}/members")
+@app.get("/api/projects/{project_id}/members")
+def get_project_members_endpoint(
+    project_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Fetches members of a specific project with zero-trust authorization check."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Verify the current user has access to this project first
+    is_member = cursor.execute(
+        "SELECT 1 FROM ProjectMembers WHERE user_id = ? AND project_id = ?",
+        (current_user["id"], project_id),
+    ).fetchone()
+    if not is_member:
+        conn.close()
+        raise HTTPException(
+            status_code=403,
+            detail="Unauthorized: You do not have access to this workspace.",
+        )
+
+    cursor.execute(
+        """
+        SELECT u.id, u.canonical_name, u.canonical_name as name, u.role
+        FROM Users u
+        JOIN ProjectMembers pm ON u.id = pm.user_id
+        WHERE pm.project_id = ?
+        ORDER BY u.id ASC
+        """,
+        (project_id,),
+    )
+    rows = cursor.fetchall()
+    members = [dict(r) for r in rows]
+    conn.close()
+    return members
+
+
 @app.post("/create_meeting", status_code=status.HTTP_201_CREATED)
 @app.post("/api/create_meeting", status_code=status.HTTP_201_CREATED)
 @app.post("/meetings", status_code=status.HTTP_201_CREATED)
@@ -3442,7 +3510,7 @@ def create_meeting_endpoint(
     payload: MeetingCreateRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Creates a new meeting record in SQLite with mandatory project authorization."""
+    """Creates a new meeting record in SQLite with mandatory project authorization and outsider validation."""
     if not payload.project_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -3464,7 +3532,56 @@ def create_meeting_endpoint(
             detail=f"Forbidden: User '{current_user['canonical_name']}' is not an authorized member of project {payload.project_id}.",
         )
 
-    cfg_json = json.dumps(payload.config_flags or {"expected_participants": [current_user["id"]]})
+    # 1. Pull allowed users for this project
+    allowed_users = [
+        row[0]
+        for row in cursor.execute(
+            "SELECT user_id FROM ProjectMembers WHERE project_id = ?",
+            (payload.project_id,),
+        ).fetchall()
+    ]
+
+    # 2. Check each attendee against the allowed list
+    attendees_to_check = []
+    if payload.attendees:
+        attendees_to_check.extend(payload.attendees)
+    if payload.config_flags and isinstance(payload.config_flags, dict):
+        exp = payload.config_flags.get("expected_participants", [])
+        if isinstance(exp, list):
+            attendees_to_check.extend(exp)
+
+    for attendee in attendees_to_check:
+        attendee_id = None
+        if isinstance(attendee, int):
+            attendee_id = attendee
+        elif isinstance(attendee, dict) and "id" in attendee:
+            attendee_id = attendee["id"]
+        elif isinstance(attendee, str):
+            if attendee.isdigit():
+                attendee_id = int(attendee)
+            else:
+                uid = get_user_id_by_name(attendee)
+                if uid is not None:
+                    attendee_id = uid
+                else:
+                    conn.close()
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Security Block: User {attendee} is not in Project {payload.project_id}",
+                    )
+
+        if attendee_id not in allowed_users:
+            conn.close()
+            raise HTTPException(
+                status_code=400,
+                detail=f"Security Block: User {attendee_id if attendee_id is not None else attendee} is not in Project {payload.project_id}",
+            )
+
+    cfg = payload.config_flags or {"expected_participants": [current_user["id"]]}
+    if payload.attendees and "expected_participants" not in cfg:
+        cfg["expected_participants"] = payload.attendees
+    cfg_json = json.dumps(cfg)
+
     cursor.execute(
         "INSERT INTO Meetings (purpose, scheduled_time, config_flags, project_id) VALUES (?, ?, ?, ?)",
         (payload.purpose, payload.scheduled_time, cfg_json, payload.project_id),

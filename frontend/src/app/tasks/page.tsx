@@ -9,21 +9,24 @@ import {
   fetchTasks,
   fetchUsers,
   fetchProjects,
+  fetchProjectMembers,
   createTask,
   api,
   AuthUser,
   TaskItem,
   ProjectItem,
+  ProjectMember,
 } from "@/lib/api";
-import { Plus, Trash2, CheckCircle2, Clock, X, AlertCircle, Shield, User, FolderLock } from "lucide-react";
+import { Plus, Trash2, CheckCircle2, Clock, X, AlertCircle, Shield, User, FolderLock, Users } from "lucide-react";
 
 export default function TasksPage() {
   const router = useRouter();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [members, setMembers] = useState<ProjectMember[]>([]);
   const [usersList, setUsersList] = useState<AuthUser[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<number | "all">("all");
+  const [activeProjectId, setActiveProjectId] = useState<number | "all">(1);
   const [filter, setFilter] = useState<"all" | "completed" | "pending">("all");
   const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
   const [isLoading, setIsLoading] = useState(true);
@@ -36,6 +39,7 @@ export default function TasksPage() {
   const [newTaskProjectId, setNewTaskProjectId] = useState<number>(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // 1. Initial user & projects setup
   useEffect(() => {
     const currentUser = getCurrentUser();
     if (!currentUser) {
@@ -43,30 +47,69 @@ export default function TasksPage() {
       return;
     }
     setUser(currentUser);
-    loadData(currentUser);
+
+    const initProjectsAndUsers = async () => {
+      try {
+        const [pData, uData] = await Promise.all([
+          fetchProjects().catch(() => []),
+          currentUser.role === "admin" ? fetchUsers().catch(() => []) : Promise.resolve([]),
+        ]);
+        if (pData && pData.length > 0) {
+          setProjects(pData);
+          setActiveProjectId(pData[0].id);
+          setNewTaskProjectId(pData[0].id);
+        }
+        if (uData && uData.length > 0) {
+          setUsersList(uData);
+        }
+      } catch (err) {
+        console.error("Failed to load initial project metadata", err);
+      }
+    };
+    initProjectsAndUsers();
   }, [router]);
 
-  const loadData = async (activeUser?: AuthUser | null) => {
+  // 2. React state tied directly to activeProjectId: clear old tasks immediately & fetch isolated data
+  useEffect(() => {
+    if (!user) return;
+    let isCurrent = true;
+
+    // Instantly clear old tasks and members from state to prevent visual leak/overlap
+    setTasks([]);
+    setMembers([]);
     setIsLoading(true);
-    try {
-      const [tData, uData, pData] = await Promise.all([
-        fetchTasks(),
-        (activeUser?.role || user?.role) === "admin" ? fetchUsers() : Promise.resolve([]),
-        fetchProjects().catch(() => []),
-      ]);
-      setTasks(tData || []);
-      if (uData && uData.length > 0) {
-        setUsersList(uData);
+
+    const loadProjectData = async () => {
+      try {
+        const pid = activeProjectId === "all" ? undefined : activeProjectId;
+        const [tData, mData] = await Promise.all([
+          fetchTasks(pid),
+          typeof pid === "number" ? fetchProjectMembers(pid) : Promise.resolve([]),
+        ]);
+        if (!isCurrent) return;
+        setTasks(tData || []);
+        setMembers(mData || []);
+      } catch (err) {
+        console.error("Failed to fetch project tasks and members", err);
+      } finally {
+        if (isCurrent) setIsLoading(false);
       }
-      if (pData && pData.length > 0) {
-        setProjects(pData);
-        setNewTaskProjectId((prev) => (pData.some((p) => p.id === prev) ? prev : pData[0].id));
-      }
-    } catch {
-      // quiet catch
-    } finally {
-      setIsLoading(false);
-    }
+    };
+
+    loadProjectData();
+    return () => {
+      isCurrent = false;
+    };
+  }, [activeProjectId, user]);
+
+  const refreshProjectTasks = async () => {
+    const pid = activeProjectId === "all" ? undefined : activeProjectId;
+    const [tData, mData] = await Promise.all([
+      fetchTasks(pid),
+      typeof pid === "number" ? fetchProjectMembers(pid) : Promise.resolve([]),
+    ]);
+    setTasks(tData || []);
+    if (mData && mData.length > 0) setMembers(mData);
   };
 
   const handleCreateTask = async (e: React.FormEvent) => {
@@ -80,7 +123,7 @@ export default function TasksPage() {
       setNewTaskDeadline("");
       setNewTaskAssigneeId(undefined);
       setShowModal(false);
-      await loadData(user);
+      await refreshProjectTasks();
     } catch (err: any) {
       alert(err.response?.data?.detail || "Failed to create task");
     } finally {
@@ -111,11 +154,6 @@ export default function TasksPage() {
   };
 
   const filteredTasks = tasks.filter((t) => {
-    // Project View State Isolation
-    if (activeProjectId !== "all") {
-      if (t.project_id !== activeProjectId) return false;
-    }
-
     // Status filter
     if (filter === "completed" && t.status !== "completed") return false;
     if (filter === "pending" && t.status === "completed") return false;
@@ -182,8 +220,8 @@ export default function TasksPage() {
                   </button>
                   {projects.map((p) => {
                     const isConfidential = p.id === 2 || p.name.includes("Confidential");
-                    const count = tasks.filter((t) => t.project_id === p.id).length;
                     const isSelected = activeProjectId === p.id;
+                    const count = isSelected ? tasks.length : (activeProjectId === "all" ? tasks.filter((t) => t.project_id === p.id).length : null);
                     return (
                       <button
                         key={p.id}
@@ -201,13 +239,15 @@ export default function TasksPage() {
                       >
                         {isConfidential ? <Shield className="w-3.5 h-3.5 text-red-400" /> : null}
                         <span>{p.name}</span>
-                        <span
-                          className={`text-[10px] px-1.5 py-0.2 rounded-full ${
-                            isSelected ? "bg-white/20 text-white" : "bg-zinc-700 text-zinc-300"
-                          }`}
-                        >
-                          {count}
-                        </span>
+                        {count !== null && (
+                          <span
+                            className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                              isSelected ? "bg-white/20 text-white" : "bg-zinc-700 text-zinc-300"
+                            }`}
+                          >
+                            {count}
+                          </span>
+                        )}
                       </button>
                     );
                   })}
@@ -280,100 +320,163 @@ export default function TasksPage() {
             )}
           </div>
 
-          {/* Tasks Table Dark Card */}
-          <div className="bg-[#18181b] border border-zinc-800 rounded-2xl p-6 shadow-xs">
-            {isLoading ? (
-              <div className="py-12 text-center text-xs text-gray-400">Loading tasks...</div>
-            ) : filteredTasks.length === 0 ? (
-              <div className="py-12 text-center text-xs text-gray-400">
-                No tasks found for this view.
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead>
-                    <tr className="border-b border-zinc-800/80 text-[11px] text-gray-400 font-medium pb-2">
-                      <th className="pb-2.5 font-medium">Task</th>
-                      <th className="pb-2.5 font-medium">Project</th>
-                      {user?.role === "admin" && <th className="pb-2.5 font-medium">Assignee</th>}
-                      <th className="pb-2.5 font-medium">Deadline</th>
-                      <th className="pb-2.5 font-medium">Status</th>
-                      <th className="pb-2.5 font-medium text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-800/50">
-                    {filteredTasks.map((task) => (
-                      <tr key={task.id} className="group hover:bg-zinc-800/30 transition-colors">
-                        <td className="py-3 text-xs font-medium text-gray-200 group-hover:text-white">
-                          <div className="flex items-center gap-2.5">
-                            <button
-                              onClick={() => handleToggleTask(task.id, task.status)}
-                              className="cursor-pointer text-gray-400 hover:text-white"
-                            >
-                              {task.status === "completed" ? (
-                                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                              ) : (
-                                <div className="w-4 h-4 rounded-full border border-gray-500 hover:border-white"></div>
-                              )}
-                            </button>
+          {/* Project Content: Side-by-side Tasks Table and Authorized Members Panel */}
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
+            {/* Left 3 cols: Tasks Table */}
+            <div className="lg:col-span-3 bg-[#18181b] border border-zinc-800 rounded-2xl p-6 shadow-xs">
+              {isLoading ? (
+                <div className="py-12 text-center text-xs text-gray-400">Loading tasks...</div>
+              ) : filteredTasks.length === 0 ? (
+                <div className="py-12 text-center text-xs text-gray-400">
+                  No tasks found for this view.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="border-b border-zinc-800/80 text-[11px] text-gray-400 font-medium pb-2">
+                        <th className="pb-2.5 font-medium">Task</th>
+                        <th className="pb-2.5 font-medium">Project</th>
+                        {user?.role === "admin" && <th className="pb-2.5 font-medium">Assignee</th>}
+                        <th className="pb-2.5 font-medium">Deadline</th>
+                        <th className="pb-2.5 font-medium">Status</th>
+                        <th className="pb-2.5 font-medium text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-800/50">
+                      {filteredTasks.map((task) => (
+                        <tr key={task.id} className="group hover:bg-zinc-800/30 transition-colors">
+                          <td className="py-3 text-xs font-medium text-gray-200 group-hover:text-white">
+                            <div className="flex items-center gap-2.5">
+                              <button
+                                onClick={() => handleToggleTask(task.id, task.status)}
+                                className="cursor-pointer text-gray-400 hover:text-white"
+                              >
+                                {task.status === "completed" ? (
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                                ) : (
+                                  <div className="w-4 h-4 rounded-full border border-gray-500 hover:border-white"></div>
+                                )}
+                              </button>
+                              <span
+                                className={
+                                  task.status === "completed"
+                                    ? "line-through text-gray-500"
+                                    : "text-gray-200"
+                                }
+                              >
+                                {task.task}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="py-3 text-xs">
                             <span
-                              className={
-                                task.status === "completed"
-                                  ? "line-through text-gray-500"
-                                  : "text-gray-200"
-                              }
+                              className={`px-2 py-0.5 rounded-md text-[11px] font-medium border ${
+                                task.project_id === 2 || (task.project_name || "").includes("Confidential")
+                                  ? "bg-red-500/10 text-red-400 border-red-500/30"
+                                  : "bg-blue-500/10 text-blue-400 border-blue-500/30"
+                              }`}
                             >
-                              {task.task}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="py-3 text-xs">
-                          <span
-                            className={`px-2 py-0.5 rounded-md text-[11px] font-medium border ${
-                              task.project_id === 2 || (task.project_name || "").includes("Confidential")
-                                ? "bg-red-500/10 text-red-400 border-red-500/30"
-                                : "bg-blue-500/10 text-blue-400 border-blue-500/30"
-                            }`}
-                          >
-                            {task.project_name || (task.project_id === 2 ? "Project B (Confidential)" : "Project A (Main)")}
-                          </span>
-                        </td>
-                        {user?.role === "admin" && (
-                          <td className="py-3 text-xs text-zinc-300">
-                            <span className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[11px]">
-                              {task.assignee || "Unassigned"}
+                              {task.project_name || (task.project_id === 2 ? "Project B (Confidential)" : "Project A (Main)")}
                             </span>
                           </td>
-                        )}
-                        <td className="py-3 text-xs text-gray-400">{task.deadline}</td>
-                        <td className="py-3 text-xs">
-                          {task.status === "completed" ? (
-                            <span className="flex items-center gap-1.5 text-emerald-400">
-                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                              <span>Completed</span>
-                            </span>
-                          ) : (
-                            <span className="flex items-center gap-1.5 text-amber-400">
-                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                              <span>Pending</span>
-                            </span>
+                          {user?.role === "admin" && (
+                            <td className="py-3 text-xs text-zinc-300">
+                              <span className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[11px]">
+                                {task.assignee || "Unassigned"}
+                              </span>
+                            </td>
                           )}
-                        </td>
-                        <td className="py-3 text-xs text-right">
-                          <button
-                            onClick={() => handleDeleteTask(task.id)}
-                            className="text-gray-500 hover:text-red-400 p-1 rounded-md transition-colors cursor-pointer"
-                            title="Delete Task"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                          <td className="py-3 text-xs text-gray-400">{task.deadline}</td>
+                          <td className="py-3 text-xs">
+                            {task.status === "completed" ? (
+                              <span className="flex items-center gap-1.5 text-emerald-400">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                                <span>Completed</span>
+                              </span>
+                            ) : (
+                              <span className="flex items-center gap-1.5 text-amber-400">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                                <span>Pending</span>
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 text-xs text-right">
+                            <button
+                              onClick={() => handleDeleteTask(task.id)}
+                              className="text-gray-500 hover:text-red-400 p-1 rounded-md transition-colors cursor-pointer"
+                              title="Delete Task"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Right 1 col: Authorized Members Card */}
+            <div className="lg:col-span-1 bg-[#18181b] border border-zinc-800 rounded-2xl p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between border-b border-zinc-800/80 pb-3">
+                <div className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-indigo-400" />
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                    Authorized Members
+                  </h3>
+                </div>
+                <span className="text-[10px] bg-zinc-800 text-zinc-300 px-2 py-0.5 rounded-full border border-zinc-700 font-bold">
+                  {members.length}
+                </span>
               </div>
-            )}
+
+              {isLoading ? (
+                <div className="py-6 text-center text-xs text-zinc-500">Loading members...</div>
+              ) : members.length === 0 ? (
+                <div className="py-6 text-center text-xs text-zinc-500">
+                  {activeProjectId === "all" ? "Select a project to inspect members" : "No authorized members listed"}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {members.map((m) => (
+                    <div
+                      key={m.id}
+                      className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-900/60 border border-zinc-800/80 hover:border-zinc-700 transition-colors"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-7 h-7 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-white text-[11px] font-bold shrink-0">
+                          {(m.canonical_name || m.name || "U")[0].toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold text-zinc-200 truncate">
+                            {m.canonical_name || m.name}
+                          </p>
+                          <p className="text-[10px] text-zinc-500 truncate">
+                            User #{m.id}
+                          </p>
+                        </div>
+                      </div>
+                      <span
+                        className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
+                          m.role === "admin"
+                            ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                            : "bg-zinc-800 text-zinc-400"
+                        }`}
+                      >
+                        {m.role || "member"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="pt-2 border-t border-zinc-800/80 flex items-center gap-2 text-[10px] text-zinc-400">
+                <Shield className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>Zero-Trust: Only listed users have access.</span>
+              </div>
+            </div>
           </div>
         </main>
       </div>
@@ -431,20 +534,20 @@ export default function TasksPage() {
                 />
               </div>
 
-              {user?.role === "admin" && usersList.length > 0 && (
+              {user?.role === "admin" && (
                 <div>
                   <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1">
-                    Assignee
+                    Assignee (Authorized Project Members)
                   </label>
                   <select
                     value={newTaskAssigneeId || ""}
                     onChange={(e) => setNewTaskAssigneeId(e.target.value ? Number(e.target.value) : undefined)}
-                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-gray-200 focus:outline-none focus:border-black bg-white"
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-gray-200 focus:outline-none focus:border-black bg-white cursor-pointer"
                   >
                     <option value="">Unassigned</option>
-                    {usersList.map((u) => (
+                    {(members.length > 0 && newTaskProjectId === activeProjectId ? members : usersList).map((u) => (
                       <option key={u.id} value={u.id}>
-                        {u.canonical_name || u.name}
+                        {u.canonical_name || u.name} {u.role === "admin" ? "(Admin)" : ""}
                       </option>
                     ))}
                   </select>

@@ -223,3 +223,74 @@ def test_system_prompt_and_save_tasks_constraint():
     assert rohith_mapped_task[1] is not None
     assert rohith_mapped_task[2] == 2
     conn.close()
+
+
+def test_get_tasks_zero_trust_lockdown():
+    """Verify GET /tasks?project_id=2 blocks non-members with 403 and exact message."""
+    sambhav_token = client.post("/login", json={"canonical_name": "Sambhav", "password": "sambhav123"}).json()["access_token"]
+    resp = client.get("/api/tasks?project_id=2", headers={"Authorization": f"Bearer {sambhav_token}"})
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Unauthorized: You do not have access to this workspace."
+
+    # Authorized user receives 200 and isolated tasks
+    rohith_token = client.post("/login", json={"canonical_name": "Rohith", "password": "rohith123"}).json()["access_token"]
+    resp_r = client.get("/api/tasks?project_id=2", headers={"Authorization": f"Bearer {rohith_token}"})
+    assert resp_r.status_code == 200
+    for t in resp_r.json():
+        assert t["project_id"] == 2
+
+
+def test_get_project_members_endpoint():
+    """Verify GET /projects/{project_id}/members returns authorized members or 403."""
+    sambhav_token = client.post("/login", json={"canonical_name": "Sambhav", "password": "sambhav123"}).json()["access_token"]
+    resp = client.get("/api/projects/2/members", headers={"Authorization": f"Bearer {sambhav_token}"})
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Unauthorized: You do not have access to this workspace."
+
+    rohith_token = client.post("/login", json={"canonical_name": "Rohith", "password": "rohith123"}).json()["access_token"]
+    resp_r = client.get("/api/projects/2/members", headers={"Authorization": f"Bearer {rohith_token}"})
+    assert resp_r.status_code == 200
+    members = resp_r.json()
+    member_names = sorted([m["canonical_name"] for m in members])
+    assert member_names == ["Admin", "Mayank", "Rohith"]
+
+
+def test_create_meeting_block_outsiders():
+    """Verify create_meeting rejects outsider attendees with 400 Security Block."""
+    rohith_token = client.post("/login", json={"canonical_name": "Rohith", "password": "rohith123"}).json()["access_token"]
+    rohith_headers = {"Authorization": f"Bearer {rohith_token}"}
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM Users WHERE canonical_name = 'Sambhav'")
+    sambhav_uid = cursor.fetchone()[0]
+    cursor.execute("SELECT id FROM Users WHERE canonical_name = 'Mayank'")
+    mayank_uid = cursor.fetchone()[0]
+    conn.close()
+
+    # Attempt to invite outsider Sambhav to Project 2 (Confidential)
+    resp = client.post(
+        "/create_meeting",
+        json={
+            "purpose": "Confidential Board Meeting",
+            "scheduled_time": "Today",
+            "project_id": 2,
+            "attendees": [mayank_uid, sambhav_uid],
+        },
+        headers=rohith_headers,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == f"Security Block: User {sambhav_uid} is not in Project 2"
+
+    # Valid attendees only -> Success
+    resp_ok = client.post(
+        "/create_meeting",
+        json={
+            "purpose": "Confidential Board Meeting Valid",
+            "scheduled_time": "Today",
+            "project_id": 2,
+            "attendees": [mayank_uid],
+        },
+        headers=rohith_headers,
+    )
+    assert resp_ok.status_code == 201

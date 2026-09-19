@@ -94,6 +94,13 @@ export interface ProjectItem {
   name: string;
 }
 
+export interface ProjectMember {
+  id: number;
+  name: string;
+  canonical_name?: string;
+  role?: string;
+}
+
 export interface BotStatus {
   active: boolean;
   meet_url: string | null;
@@ -227,6 +234,15 @@ export async function endMeetingBatch(payload: {
 export async function fetchProjects(): Promise<ProjectItem[]> {
   const res = await api.get("/api/projects");
   return res.data || [];
+}
+
+export async function fetchProjectMembers(projectId: number): Promise<ProjectMember[]> {
+  try {
+    const res = await api.get(`/api/projects/${projectId}/members`);
+    return res.data || [];
+  } catch {
+    return [];
+  }
 }
 
 export async function fetchLatestResult(): Promise<MeetingSummary | null> {
