@@ -10,12 +10,14 @@ import {
   fetchMeetings,
   fetchBotStatus,
   fetchLatestResult,
+  fetchProjects,
   joinMeeting,
   scheduleMeeting,
   leaveMeeting,
   api,
   AuthUser,
   MeetingItem,
+  ProjectItem,
   BotStatus,
   MeetingSummary,
 } from "@/lib/api";
@@ -30,12 +32,15 @@ import {
   Users,
   CheckCircle2,
   FileText,
+  FolderLock,
 } from "lucide-react";
 
 export default function MeetingsPage() {
   const router = useRouter();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [meetings, setMeetings] = useState<MeetingItem[]>([]);
+  const [projects, setProjects] = useState<ProjectItem[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<number>(1);
   const [botStatus, setBotStatus] = useState<BotStatus | null>(null);
   const [latestResult, setLatestResult] = useState<MeetingSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -80,14 +85,19 @@ export default function MeetingsPage() {
   const loadAll = async () => {
     setIsLoading(true);
     try {
-      const [mData, bStatus, lRes] = await Promise.all([
+      const [mData, bStatus, lRes, pData] = await Promise.all([
         fetchMeetings().catch(() => []),
         fetchBotStatus().catch(() => null),
         fetchLatestResult().catch(() => null),
+        fetchProjects().catch(() => []),
       ]);
       setMeetings(mData || []);
       setBotStatus(bStatus);
       setLatestResult(lRes);
+      if (pData && pData.length > 0) {
+        setProjects(pData);
+        setSelectedProjectId((prev) => (pData.some((p) => p.id === prev) ? prev : pData[0].id));
+      }
     } catch {
       // quiet catch
     } finally {
@@ -114,6 +124,7 @@ export default function MeetingsPage() {
           share_technical_summary: shareTechnical,
           meeting_purpose: meetingPurpose,
           duration_sec: 180,
+          project_id: selectedProjectId,
         });
         alert("Meeting scheduled with APScheduler successfully!");
       } else {
@@ -123,6 +134,7 @@ export default function MeetingsPage() {
           share_technical_summary: shareTechnical,
           meeting_purpose: meetingPurpose,
           duration_sec: 180,
+          project_id: selectedProjectId,
         });
       }
       setMeetUrl("");
@@ -244,6 +256,31 @@ export default function MeetingsPage() {
                     onChange={(e) => setMeetUrl(e.target.value)}
                     className="w-full text-xs px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-zinc-700 text-white placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
                   />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-gray-300 mb-1 flex items-center justify-between">
+                    <span>Project Authorization & Isolation</span>
+                    {projects.find((p) => p.id === selectedProjectId)?.name.includes("Confidential") && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-md bg-red-500/20 text-red-400 border border-red-500/30 font-semibold flex items-center gap-1">
+                        <Shield className="w-2.5 h-2.5" /> Strict Confidential
+                      </span>
+                    )}
+                  </label>
+                  <select
+                    value={selectedProjectId}
+                    onChange={(e) => setSelectedProjectId(Number(e.target.value))}
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-zinc-700 text-white focus:outline-none focus:border-zinc-500 cursor-pointer"
+                  >
+                    {projects.map((proj) => (
+                      <option key={proj.id} value={proj.id}>
+                        {proj.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    Meeting transcript & action items are strictly isolated to authorized members of this project.
+                  </p>
                 </div>
 
                 <div>
@@ -403,6 +440,7 @@ export default function MeetingsPage() {
                   <thead>
                     <tr className="border-b border-zinc-800/80 text-[11px] text-gray-400 font-medium pb-2">
                       <th className="pb-2.5 font-medium">Purpose</th>
+                      <th className="pb-2.5 font-medium">Project</th>
                       <th className="pb-2.5 font-medium">Scheduled Time</th>
                       <th className="pb-2.5 font-medium">Privacy Status</th>
                     </tr>
@@ -417,6 +455,17 @@ export default function MeetingsPage() {
                           >
                             <span>{m.purpose}</span>
                           </Link>
+                        </td>
+                        <td className="py-3 text-xs">
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[11px] font-medium border ${
+                              m.project_id === 2 || (m.project_name || "").includes("Confidential")
+                                ? "bg-red-500/10 text-red-400 border-red-500/30"
+                                : "bg-blue-500/10 text-blue-400 border-blue-500/30"
+                            }`}
+                          >
+                            {m.project_name || (m.project_id === 2 ? "Project B (Confidential)" : "Project A (Main)")}
+                          </span>
                         </td>
                         <td className="py-3 text-xs text-gray-400">{m.scheduled_time}</td>
                         <td className="py-3 text-xs">

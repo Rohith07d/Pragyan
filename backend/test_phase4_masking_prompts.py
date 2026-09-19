@@ -212,6 +212,8 @@ def test_full_pipeline_phase4_end_to_end(client: TestClient):
     6. Ephemeral RAM wiped
     """
     wipe_ephemeral_ram()
+    import proxy
+    proxy._ACTIVE_MEETING_CONFIG = {}
 
     # Raw transcript with ASR misspellings and NO deadlines mentioned
     raw_transcript = (

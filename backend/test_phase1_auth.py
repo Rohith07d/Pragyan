@@ -251,6 +251,7 @@ def test_single_meeting_privacy_and_access(client):
             "purpose": "Sambhav Private Architecture Review",
             "scheduled_time": "2026-10-01T10:00:00",
             "config_flags": {"expected_participants": ["Sambhav"]},
+            "project_id": 1,
         },
         headers=sambhav_headers,
     )

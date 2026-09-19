@@ -8,18 +8,22 @@ import {
   getCurrentUser,
   fetchTasks,
   fetchUsers,
+  fetchProjects,
   createTask,
   api,
   AuthUser,
   TaskItem,
+  ProjectItem,
 } from "@/lib/api";
-import { Plus, Trash2, CheckCircle2, Clock, X, AlertCircle, Shield, User } from "lucide-react";
+import { Plus, Trash2, CheckCircle2, Clock, X, AlertCircle, Shield, User, FolderLock } from "lucide-react";
 
 export default function TasksPage() {
   const router = useRouter();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [usersList, setUsersList] = useState<AuthUser[]>([]);
+  const [projects, setProjects] = useState<ProjectItem[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<number | "all">("all");
   const [filter, setFilter] = useState<"all" | "completed" | "pending">("all");
   const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
   const [isLoading, setIsLoading] = useState(true);
@@ -29,6 +33,7 @@ export default function TasksPage() {
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [newTaskDeadline, setNewTaskDeadline] = useState("");
   const [newTaskAssigneeId, setNewTaskAssigneeId] = useState<number | undefined>(undefined);
+  const [newTaskProjectId, setNewTaskProjectId] = useState<number>(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
@@ -44,13 +49,18 @@ export default function TasksPage() {
   const loadData = async (activeUser?: AuthUser | null) => {
     setIsLoading(true);
     try {
-      const [tData, uData] = await Promise.all([
+      const [tData, uData, pData] = await Promise.all([
         fetchTasks(),
         (activeUser?.role || user?.role) === "admin" ? fetchUsers() : Promise.resolve([]),
+        fetchProjects().catch(() => []),
       ]);
       setTasks(tData || []);
       if (uData && uData.length > 0) {
         setUsersList(uData);
+      }
+      if (pData && pData.length > 0) {
+        setProjects(pData);
+        setNewTaskProjectId((prev) => (pData.some((p) => p.id === prev) ? prev : pData[0].id));
       }
     } catch {
       // quiet catch
@@ -65,7 +75,7 @@ export default function TasksPage() {
     setIsSubmitting(true);
     try {
       const assignee = user?.role === "admin" ? newTaskAssigneeId : user?.id;
-      await createTask(newTaskTitle.trim(), newTaskDeadline.trim() || "unknown", assignee);
+      await createTask(newTaskTitle.trim(), newTaskDeadline.trim() || "unknown", assignee, newTaskProjectId);
       setNewTaskTitle("");
       setNewTaskDeadline("");
       setNewTaskAssigneeId(undefined);
@@ -101,6 +111,11 @@ export default function TasksPage() {
   };
 
   const filteredTasks = tasks.filter((t) => {
+    // Project View State Isolation
+    if (activeProjectId !== "all") {
+      if (t.project_id !== activeProjectId) return false;
+    }
+
     // Status filter
     if (filter === "completed" && t.status !== "completed") return false;
     if (filter === "pending" && t.status === "completed") return false;
@@ -143,6 +158,73 @@ export default function TasksPage() {
               <span>Create Task</span>
             </button>
           </div>
+
+          {/* Project Isolated View Tabs */}
+          {projects.length > 0 && (
+            <div className="bg-[#18181b] border border-zinc-800 rounded-2xl p-4 shadow-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <FolderLock className="w-4 h-4 text-emerald-400" />
+                  <span className="text-xs font-semibold text-white tracking-wide uppercase">
+                    Project Workspaces:
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => setActiveProjectId("all")}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
+                      activeProjectId === "all"
+                        ? "bg-white text-black shadow-xs"
+                        : "bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-700"
+                    }`}
+                  >
+                    All Projects ({tasks.length})
+                  </button>
+                  {projects.map((p) => {
+                    const isConfidential = p.id === 2 || p.name.includes("Confidential");
+                    const count = tasks.filter((t) => t.project_id === p.id).length;
+                    const isSelected = activeProjectId === p.id;
+                    return (
+                      <button
+                        key={p.id}
+                        onClick={() => {
+                          setActiveProjectId(p.id);
+                          setNewTaskProjectId(p.id);
+                        }}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors border ${
+                          isSelected
+                            ? isConfidential
+                              ? "bg-red-500/20 text-red-300 border-red-500/50 shadow-xs"
+                              : "bg-blue-500/20 text-blue-300 border-blue-500/50 shadow-xs"
+                            : "bg-zinc-800 text-zinc-400 hover:text-white border-zinc-700"
+                        }`}
+                      >
+                        {isConfidential ? <Shield className="w-3.5 h-3.5 text-red-400" /> : null}
+                        <span>{p.name}</span>
+                        <span
+                          className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                            isSelected ? "bg-white/20 text-white" : "bg-zinc-700 text-zinc-300"
+                          }`}
+                        >
+                          {count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Confidential isolation banner when Project B is active */}
+              {activeProjectId === 2 && (
+                <div className="mt-3 pt-3 border-t border-zinc-800/80 flex items-center gap-2 text-xs text-red-400">
+                  <Shield className="w-4 h-4 text-red-400 shrink-0" />
+                  <span>
+                    Strict Confidential Mode: Displaying only isolated tasks for Project B. Unauthorized personnel have zero visibility into this partition.
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Filter Pills & Admin Assignee Filter */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -212,6 +294,7 @@ export default function TasksPage() {
                   <thead>
                     <tr className="border-b border-zinc-800/80 text-[11px] text-gray-400 font-medium pb-2">
                       <th className="pb-2.5 font-medium">Task</th>
+                      <th className="pb-2.5 font-medium">Project</th>
                       {user?.role === "admin" && <th className="pb-2.5 font-medium">Assignee</th>}
                       <th className="pb-2.5 font-medium">Deadline</th>
                       <th className="pb-2.5 font-medium">Status</th>
@@ -243,6 +326,17 @@ export default function TasksPage() {
                               {task.task}
                             </span>
                           </div>
+                        </td>
+                        <td className="py-3 text-xs">
+                          <span
+                            className={`px-2 py-0.5 rounded-md text-[11px] font-medium border ${
+                              task.project_id === 2 || (task.project_name || "").includes("Confidential")
+                                ? "bg-red-500/10 text-red-400 border-red-500/30"
+                                : "bg-blue-500/10 text-blue-400 border-blue-500/30"
+                            }`}
+                          >
+                            {task.project_name || (task.project_id === 2 ? "Project B (Confidential)" : "Project A (Main)")}
+                          </span>
                         </td>
                         {user?.role === "admin" && (
                           <td className="py-3 text-xs text-zinc-300">
@@ -299,6 +393,30 @@ export default function TasksPage() {
             </div>
 
             <form onSubmit={handleCreateTask} className="space-y-4">
+              {projects.length > 0 && (
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1 flex items-center justify-between">
+                    <span>Project Workspace</span>
+                    {newTaskProjectId === 2 && (
+                      <span className="text-[10px] text-red-600 font-bold flex items-center gap-1">
+                        <Shield className="w-2.5 h-2.5" /> Confidential
+                      </span>
+                    )}
+                  </label>
+                  <select
+                    value={newTaskProjectId}
+                    onChange={(e) => setNewTaskProjectId(Number(e.target.value))}
+                    className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-gray-200 focus:outline-none focus:border-black bg-white cursor-pointer"
+                  >
+                    {projects.map((proj) => (
+                      <option key={proj.id} value={proj.id}>
+                        {proj.name} {proj.id === 2 ? "(Confidential)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1">
                   Task Description

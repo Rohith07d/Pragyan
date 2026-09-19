@@ -624,11 +624,24 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS Projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL
+            name TEXT UNIQUE NOT NULL
         )
     """)
 
-    # 3. Meetings (id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status)
+    # 2b. ProjectMembers junction table (user_id to project_id mapping)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ProjectMembers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES Projects(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES Users(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(project_id, user_id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_members_project ON ProjectMembers(project_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_project_members_user ON ProjectMembers(user_id)")
+
+    # 3. Meetings (id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status, project_id)
     cursor.execute("PRAGMA table_info(Meetings)")
     meet_cols = [row[1] for row in cursor.fetchall()]
     if not meet_cols:
@@ -641,7 +654,8 @@ def init_db():
                 pm_view TEXT,
                 group_view TEXT,
                 absent_view TEXT,
-                status TEXT DEFAULT 'scheduled'
+                status TEXT DEFAULT 'scheduled',
+                project_id INTEGER REFERENCES Projects(id) ON DELETE CASCADE
             )
         """)
     else:
@@ -653,8 +667,10 @@ def init_db():
             cursor.execute("ALTER TABLE Meetings ADD COLUMN absent_view TEXT")
         if "status" not in meet_cols:
             cursor.execute("ALTER TABLE Meetings ADD COLUMN status TEXT DEFAULT 'scheduled'")
+        if "project_id" not in meet_cols:
+            cursor.execute("ALTER TABLE Meetings ADD COLUMN project_id INTEGER REFERENCES Projects(id) ON DELETE CASCADE")
 
-    # 4. Tasks (id, meeting_id, assignee_id, task, deadline)
+    # 4. Tasks (id, meeting_id, project_id, assignee_id, task, deadline, status, created_at)
     cursor.execute("PRAGMA table_info(Tasks)")
     task_cols = [row[1] for row in cursor.fetchall()]
     if not task_cols:
@@ -662,6 +678,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS Tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 meeting_id INTEGER REFERENCES Meetings(id) ON DELETE SET NULL,
+                project_id INTEGER REFERENCES Projects(id) ON DELETE CASCADE,
                 assignee_id INTEGER REFERENCES Users(id) ON DELETE CASCADE,
                 task TEXT NOT NULL,
                 deadline TEXT,
@@ -676,6 +693,8 @@ def init_db():
             cursor.execute("ALTER TABLE Tasks ADD COLUMN meeting_id INTEGER REFERENCES Meetings(id)")
         if "status" not in task_cols:
             cursor.execute("ALTER TABLE Tasks ADD COLUMN status TEXT DEFAULT 'pending'")
+        if "project_id" not in task_cols:
+            cursor.execute("ALTER TABLE Tasks ADD COLUMN project_id INTEGER REFERENCES Projects(id) ON DELETE CASCADE")
 
     # 5. UserAliases (id, user_id, alias_string) - user_id is a foreign key to Users
     cursor.execute("""
@@ -743,24 +762,74 @@ def init_db():
                             (u_id, al),
                         )
 
-    # Pre-seed sample projects if empty
-    cursor.execute("SELECT COUNT(*) FROM Projects")
-    if cursor.fetchone()[0] == 0:
-        cursor.executemany(
-            "INSERT INTO Projects (name) VALUES (?)",
-            [("Workspace App",), ("Auth System",), ("UI Kit",), ("Project A",)]
+    # Seed exactly two projects:
+    # 1. Project A (Main): All existing database users assigned
+    # 2. Project B (Confidential): Exactly 3 specific users (Admin, Rohith, Mayank) assigned
+    cursor.execute("SELECT id FROM Projects WHERE name = 'Project A (Main)'")
+    row_a = cursor.fetchone()
+    if not row_a:
+        cursor.execute("SELECT id FROM Projects WHERE id = 1")
+        if cursor.fetchone():
+            cursor.execute("UPDATE Projects SET name = 'Project A (Main)' WHERE id = 1")
+            proj_a_id = 1
+        else:
+            cursor.execute("INSERT INTO Projects (name) VALUES ('Project A (Main)')")
+            proj_a_id = cursor.lastrowid
+    else:
+        proj_a_id = row_a[0]
+
+    cursor.execute("SELECT id FROM Projects WHERE name = 'Project B (Confidential)'")
+    row_b = cursor.fetchone()
+    if not row_b:
+        cursor.execute("SELECT id FROM Projects WHERE id = 2")
+        if cursor.fetchone():
+            cursor.execute("UPDATE Projects SET name = 'Project B (Confidential)' WHERE id = 2")
+            proj_b_id = 2
+        else:
+            cursor.execute("INSERT INTO Projects (name) VALUES ('Project B (Confidential)')")
+            proj_b_id = cursor.lastrowid
+    else:
+        proj_b_id = row_b[0]
+
+    cursor.execute("DELETE FROM Projects WHERE id NOT IN (?, ?)", (proj_a_id, proj_b_id))
+
+    # Project A (Main): Assign ALL existing database users
+    cursor.execute("SELECT id FROM Users")
+    all_users = cursor.fetchall()
+    for u_row in all_users:
+        cursor.execute(
+            "INSERT OR IGNORE INTO ProjectMembers (project_id, user_id) VALUES (?, ?)",
+            (proj_a_id, u_row[0]),
         )
+
+    # Project B (Confidential): Assign exactly 3 specific users
+    confidential_names = ["Admin", "Rohith", "Mayank"]
+    cursor.execute("DELETE FROM ProjectMembers WHERE project_id = ?", (proj_b_id,))
+    for uname in confidential_names:
+        u_id = user_id_map.get(uname)
+        if not u_id:
+            cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (uname,))
+            row = cursor.fetchone()
+            u_id = row[0] if row else None
+        if u_id:
+            cursor.execute(
+                "INSERT OR IGNORE INTO ProjectMembers (project_id, user_id) VALUES (?, ?)",
+                (proj_b_id, u_id),
+            )
 
     # Pre-seed sample meetings if empty
     cursor.execute("SELECT COUNT(*) FROM Meetings")
     if cursor.fetchone()[0] == 0:
         cursor.executemany(
-            "INSERT INTO Meetings (purpose, scheduled_time, config_flags) VALUES (?, ?, ?)",
+            "INSERT INTO Meetings (purpose, scheduled_time, config_flags, project_id) VALUES (?, ?, ?, ?)",
             [
-                ("AegisMeet Architecture Sync", "Today 10:00 AM", json.dumps({"expected_participants": [1, 2, 3, 4, 5, 6], "share_technical_summary": True})),
-                ("Sprint Review & Milestones", "Tomorrow 2:00 PM", json.dumps({"expected_participants": [2, 3], "share_technical_summary": False}))
+                ("AegisMeet Architecture Sync", "Today 10:00 AM", json.dumps({"expected_participants": [1, 2, 3, 4, 5, 6], "share_technical_summary": True}), proj_a_id),
+                ("Sprint Review & Milestones", "Tomorrow 2:00 PM", json.dumps({"expected_participants": [2, 3], "share_technical_summary": False}), proj_a_id),
+                ("Confidential Air-Gap Security Briefing", "Friday 3:00 PM", json.dumps({"expected_participants": [1, 2, 3], "share_technical_summary": True}), proj_b_id),
             ]
         )
+    else:
+        cursor.execute("UPDATE Meetings SET project_id = ? WHERE project_id IS NULL OR project_id NOT IN (?, ?)", (proj_a_id, proj_a_id, proj_b_id))
 
     # Pre-seed sample tasks if empty or unassigned
     cursor.execute("SELECT COUNT(*) FROM Tasks WHERE assignee_id IS NOT NULL")
@@ -770,38 +839,40 @@ def init_db():
         sambhav_id = user_id_map.get("Sambhav", 4)
         sanjeet_id = user_id_map.get("Sanjeet", 5)
         pranav_id = user_id_map.get("Pranav", 6)
+        admin_id = user_id_map.get("Admin", 1)
         sample_tasks = [
-            (1, rohith_id, "Verify local Presidio PII token masking & SQLite task persistence", "Tomorrow at 5:00 PM", "pending"),
-            (1, rohith_id, "Deploy Discord and Slack webhook forwarders", "Next Friday", "pending"),
-            (1, rohith_id, "Configure Chromium CDP audio & caption pipeline", "Today", "completed"),
-            (1, mayank_id, "Deploy the backend updates", "Tomorrow at 5:00 PM", "pending"),
-            (1, mayank_id, "Review API risk assessment with Acme Corp", "Tomorrow at 2:00 PM", "completed"),
-            (1, sambhav_id, "Finish the QA test suite", "Friday", "pending"),
-            (1, sambhav_id, "Finalize personalized participant portal and mobile layout", "Tomorrow at 5:00 PM", "pending"),
-            (1, sanjeet_id, "Audit Presidio zero-leak PII anonymizer and security boundaries", "Tomorrow at 5:00 PM", "pending"),
-            (1, pranav_id, "Verify cloud deployment pipelines and TLS proxy endpoints", "Friday", "pending"),
+            (1, proj_a_id, rohith_id, "Verify local Presidio PII token masking & SQLite task persistence", "Tomorrow at 5:00 PM", "pending"),
+            (1, proj_a_id, rohith_id, "Deploy Discord and Slack webhook forwarders", "Next Friday", "pending"),
+            (1, proj_a_id, rohith_id, "Configure Chromium CDP audio & caption pipeline", "Today", "completed"),
+            (1, proj_a_id, mayank_id, "Deploy the backend updates", "Tomorrow at 5:00 PM", "pending"),
+            (1, proj_a_id, mayank_id, "Review API risk assessment with Acme Corp", "Tomorrow at 2:00 PM", "completed"),
+            (1, proj_a_id, sambhav_id, "Finish the QA test suite", "Friday", "pending"),
+            (1, proj_a_id, sambhav_id, "Finalize personalized participant portal and mobile layout", "Tomorrow at 5:00 PM", "pending"),
+            (1, proj_a_id, sanjeet_id, "Audit Presidio zero-leak PII anonymizer and security boundaries", "Tomorrow at 5:00 PM", "pending"),
+            (1, proj_a_id, pranav_id, "Verify cloud deployment pipelines and TLS proxy endpoints", "Friday", "pending"),
+            (1, proj_b_id, rohith_id, "Review air-gap cryptographic key rotation protocol", "Tomorrow at 4:00 PM", "pending"),
+            (1, proj_b_id, mayank_id, "Conduct zero-leak penetration test on Featherless AI endpoint", "Friday", "pending"),
+            (1, proj_b_id, admin_id, "Executive audit of classified project deliverables and RAM wiping", "unknown", "completed"),
         ]
         cursor.executemany(
-            "INSERT INTO Tasks (meeting_id, assignee_id, task, deadline, status) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO Tasks (meeting_id, project_id, assignee_id, task, deadline, status) VALUES (?, ?, ?, ?, ?, ?)",
             sample_tasks
         )
-
-    # Ensure Sanjeet and Pranav specifically have sample tasks if DB was already populated
-    sanjeet_id = user_id_map.get("Sanjeet")
-    if sanjeet_id:
-        cursor.execute("SELECT COUNT(*) FROM Tasks WHERE assignee_id = ?", (sanjeet_id,))
+    else:
+        cursor.execute("UPDATE Tasks SET project_id = ? WHERE project_id IS NULL OR project_id NOT IN (?, ?)", (proj_a_id, proj_a_id, proj_b_id))
+        # Ensure Project B has distinct tasks
+        cursor.execute("SELECT COUNT(*) FROM Tasks WHERE project_id = ?", (proj_b_id,))
         if cursor.fetchone()[0] == 0:
-            cursor.execute(
-                "INSERT INTO Tasks (meeting_id, assignee_id, task, deadline, status) VALUES (?, ?, ?, ?, ?)",
-                (1, sanjeet_id, "Audit Presidio zero-leak PII anonymizer and security boundaries", "Tomorrow at 5:00 PM", "pending")
-            )
-    pranav_id = user_id_map.get("Pranav")
-    if pranav_id:
-        cursor.execute("SELECT COUNT(*) FROM Tasks WHERE assignee_id = ?", (pranav_id,))
-        if cursor.fetchone()[0] == 0:
-            cursor.execute(
-                "INSERT INTO Tasks (meeting_id, assignee_id, task, deadline, status) VALUES (?, ?, ?, ?, ?)",
-                (1, pranav_id, "Verify cloud deployment pipelines and TLS proxy endpoints", "Friday", "pending")
+            admin_id = user_id_map.get("Admin", 1)
+            rohith_id = user_id_map.get("Rohith", 2)
+            mayank_id = user_id_map.get("Mayank", 3)
+            cursor.executemany(
+                "INSERT INTO Tasks (meeting_id, project_id, assignee_id, task, deadline, status) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (1, proj_b_id, rohith_id, "Review air-gap cryptographic key rotation protocol", "Tomorrow at 4:00 PM", "pending"),
+                    (1, proj_b_id, mayank_id, "Conduct zero-leak penetration test on Featherless AI endpoint", "Friday", "pending"),
+                    (1, proj_b_id, admin_id, "Executive audit of classified project deliverables and RAM wiping", "unknown", "completed"),
+                ]
             )
 
     # 6. Messages (id, channel_id, sender_id, sender_name, sender_role, text, created_at)
@@ -925,47 +996,85 @@ def get_user_id_by_name(canonical_name: str) -> Optional[int]:
     return row[0] if row else None
 
 
-def save_tasks_to_db(tasks: List[Dict[str, Any]], meeting_id: Optional[int] = 1) -> List[int]:
+def save_tasks_to_db(
+    tasks: List[Dict[str, Any]],
+    meeting_id: Optional[int] = 1,
+    project_id: Optional[int] = None,
+) -> List[int]:
     """
-    Saves tasks to SQLite with relational meeting_id and assignee_id foreign keys.
+    Saves tasks to SQLite with relational meeting_id, project_id, and assignee_id foreign keys.
+    Enforces project membership: if assignee is not an authorized project member, maps to 'Unknown' / None.
     """
     init_db()
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     inserted_ids = []
+
+    # Determine project_id if not provided
+    resolved_pid = project_id
+    if not resolved_pid and meeting_id:
+        cursor.execute("SELECT project_id FROM Meetings WHERE id = ?", (meeting_id,))
+        m_row = cursor.fetchone()
+        if m_row and m_row[0]:
+            resolved_pid = m_row[0]
+    if not resolved_pid:
+        resolved_pid = 1
+
+    # Fetch authorized project members for this project_id
+    cursor.execute("""
+        SELECT u.id, LOWER(u.canonical_name) 
+        FROM Users u
+        INNER JOIN ProjectMembers pm ON pm.user_id = u.id
+        WHERE pm.project_id = ?
+    """, (resolved_pid,))
+    auth_members_dict = {row[1]: row[0] for row in cursor.fetchall()}
+
     for t in tasks:
-        assignee_val = t.get("assignee") or t.get("assignee_token") or "Unassigned"
+        assignee_val = (t.get("assignee") or t.get("assignee_token") or "Unassigned").strip()
         assignee_id = t.get("assignee_id")
-        if not assignee_id and assignee_val != "Unassigned":
-            cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (assignee_val.strip(),))
-            row = cursor.fetchone()
-            if row:
-                assignee_id = row[0]
+
+        if assignee_val.lower() in ("unknown", "unassigned", ""):
+            assignee_id = None
+            assignee_val = "Unknown"
+        elif not assignee_id:
+            if assignee_val.lower() in auth_members_dict:
+                assignee_id = auth_members_dict[assignee_val.lower()]
             else:
-                # Also check UserAliases table for phonetic or nickname match
-                cursor.execute("SELECT user_id FROM UserAliases WHERE LOWER(alias_string) = LOWER(?)", (assignee_val.strip(),))
+                # Check UserAliases for authorized member
+                cursor.execute("""
+                    SELECT ua.user_id, LOWER(u.canonical_name) 
+                    FROM UserAliases ua
+                    INNER JOIN Users u ON u.id = ua.user_id
+                    INNER JOIN ProjectMembers pm ON pm.user_id = ua.user_id
+                    WHERE LOWER(ua.alias_string) = LOWER(?) AND pm.project_id = ?
+                """, (assignee_val, resolved_pid))
                 alias_row = cursor.fetchone()
                 if alias_row:
                     assignee_id = alias_row[0]
                 else:
-                    # Check prefix on canonical_name
-                    cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) LIKE LOWER(?) || '%'", (assignee_val.strip(),))
-                    prefix_row = cursor.fetchone()
-                    if prefix_row:
-                        assignee_id = prefix_row[0]
+                    # Non-authorized member: map to Unknown per LLM constraint
+                    assignee_val = "Unknown"
+                    assignee_id = None
+        else:
+            # assignee_id provided, verify membership
+            if assignee_id not in auth_members_dict.values():
+                assignee_val = "Unknown"
+                assignee_id = None
 
         task_mid = t.get("meeting_id") or meeting_id
+        task_pid = t.get("project_id") or resolved_pid
         deadline_val = (t.get("deadline") or "unknown").strip()
         if not deadline_val or deadline_val.lower() in ("none", "unspecified", "tbd", "n/a", "null", ""):
             deadline_val = "unknown"
 
         cursor.execute(
             """
-            INSERT INTO Tasks (meeting_id, assignee_id, task, deadline, status)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO Tasks (meeting_id, project_id, assignee_id, task, deadline, status)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 task_mid,
+                task_pid,
                 assignee_id,
                 t.get("task", ""),
                 deadline_val,
@@ -975,7 +1084,7 @@ def save_tasks_to_db(tasks: List[Dict[str, Any]], meeting_id: Optional[int] = 1)
         inserted_ids.append(cursor.lastrowid)
     conn.commit()
     conn.close()
-    logger.info(f"Saved {len(inserted_ids)} relational task(s) to SQLite.")
+    logger.info(f"Saved {len(inserted_ids)} relational task(s) to SQLite under project {resolved_pid}.")
     return inserted_ids
 
 
@@ -1288,10 +1397,17 @@ def save_user_aliases_to_db(user_id: int, canonical_name: str, aliases: List[str
 # ==============================================================================
 # Featherless AI Client / Reasoning Layer
 # ==============================================================================
-def build_system_prompt(meeting_purpose: str = "AegisMeet Sync", share_technical_summary: bool = True) -> str:
+def build_system_prompt(
+    meeting_purpose: str = "AegisMeet Sync",
+    share_technical_summary: bool = True,
+    project_name: str = "Project A (Main)",
+    authorized_members_list: str = "Admin, Rohith, Mayank, Sambhav, Sanjeet, Pranav",
+    project_id: Union[int, str] = 1,
+) -> str:
     """
-    Phase 4 Context-Aware System Prompt:
-    - Injects meeting_purpose into analysis context
+    Phase 4 Context-Aware System Prompt with Project-Based Access Control:
+    - Enforces strict project isolation: tasks assigned ONLY to authorized project members
+    - Injects meeting_purpose and project_id into analysis context
     - Enforces assigning 'unknown' to deadlines if no explicit date/time is mentioned
     - Omits deeply technical architecture details if share_technical_summary is False
     - Demands comprehensive, exhaustive, multi-point structured summaries covering all meeting topics, decisions, risks, and next steps.
@@ -1306,12 +1422,23 @@ def build_system_prompt(meeting_purpose: str = "AegisMeet Sync", share_technical
             "Provide concise, high-level operational and business-friendly summaries only."
         )
 
+    project_constraint_instruction = (
+        f"You are processing a meeting transcript exclusively for the project: {project_name}. "
+        f"You must strictly assign action items ONLY to the following authorized project members: {authorized_members_list}. "
+        f"If a speaker assigns a task to someone not on this list, map it to 'Unknown'. "
+        f"Categorize all generated tasks strictly under {project_id}."
+    )
+
     return f"""You are AegisMeet Reasoning Agent, an air-gapped meeting intelligence engine.
 You receive meeting transcripts that have been sanitized: personal names and company names are masked with tokens like [PERSON_1], [ORG_1], [LOCATION_1], etc.
 
 MEETING CONTEXT:
 - Purpose / Topic: {meeting_purpose}
 - Summary Granularity: {"Detailed Technical & Operational" if share_technical_summary else "High-Level Executive"}
+- Project: {project_name} (ID: {project_id})
+
+PROJECT ACCESS CONTROL DIRECTIVE:
+{project_constraint_instruction}
 
 CRITICAL DIRECTIVES:
 1. NEVER alter, translate, or invent bracketed tokens. Retain exact tokens such as [PERSON_1] as the assignee.
@@ -1327,9 +1454,10 @@ CRITICAL DIRECTIVES:
   "absent_view": "string (Detailed, comprehensive catch-up dossier for team members who missed the call, covering: 1) Meeting context and background rationale, 2) Complete breakdown of all discussion items and debate points, 3) Concrete decisions and architecture changes approved, 4) Assigned deliverables, expectations, and upcoming sprint schedule)",
   "tasks": [
     {{
-      "assignee": "[PERSON_X]",
+      "assignee": "[PERSON_X] or 'Unknown'",
       "task": "string (action item description)",
-      "deadline": "string (exact date/time mentioned, OR exactly 'unknown' if no date/time mentioned)"
+      "deadline": "string (exact date/time mentioned, OR exactly 'unknown' if no date/time mentioned)",
+      "project_id": {project_id}
     }}
   ],
   "user_alerts": [
@@ -1408,10 +1536,13 @@ async def query_featherless_ai(
     sanitized_transcript: str,
     meeting_purpose: str = "AegisMeet Sync",
     share_technical_summary: bool = True,
+    project_name: str = "Project A (Main)",
+    authorized_members_list: str = "Admin, Rohith, Mayank, Sambhav, Sanjeet, Pranav",
+    project_id: Union[int, str] = 1,
 ) -> Dict[str, Any]:
     """
     Zero-Leak Enforcement: Sends ONLY the masked/sanitized transcript to Featherless AI.
-    Dynamic Context: Injects meeting_purpose, share_technical_summary flag, and unknown deadline rule.
+    Dynamic Context: Injects meeting_purpose, project_name, authorized_members_list, and project_id.
     """
     if not FEATHERLESS_API_KEY:
         logger.warning("FEATHERLESS_API_KEY is not configured. Running offline deterministic reasoning fallback.")
@@ -1419,6 +1550,9 @@ async def query_featherless_ai(
             sanitized_transcript,
             meeting_purpose=meeting_purpose,
             share_technical_summary=share_technical_summary,
+            project_name=project_name,
+            authorized_members_list=authorized_members_list,
+            project_id=project_id,
         )
 
     headers = {
@@ -1426,7 +1560,13 @@ async def query_featherless_ai(
         "Content-Type": "application/json",
     }
 
-    system_content = build_system_prompt(meeting_purpose, share_technical_summary)
+    system_content = build_system_prompt(
+        meeting_purpose=meeting_purpose,
+        share_technical_summary=share_technical_summary,
+        project_name=project_name,
+        authorized_members_list=authorized_members_list,
+        project_id=project_id,
+    )
 
     payload = {
         "model": FEATHERLESS_MODEL,
@@ -1469,6 +1609,9 @@ async def query_featherless_ai(
         sanitized_transcript,
         meeting_purpose=meeting_purpose,
         share_technical_summary=share_technical_summary,
+        project_name=project_name,
+        authorized_members_list=authorized_members_list,
+        project_id=project_id,
     )
     fallback["pm_view"] += " (Note: Featherless cloud response encountered error; safe local reasoning fallback engaged)"
     return fallback
@@ -1478,11 +1621,15 @@ def mock_offline_reasoning(
     sanitized_transcript: str,
     meeting_purpose: str = "AegisMeet Sync",
     share_technical_summary: bool = True,
+    project_name: str = "Project A (Main)",
+    authorized_members_list: str = "Admin, Rohith, Mayank, Sambhav, Sanjeet, Pranav",
+    project_id: Union[int, str] = 1,
 ) -> Dict[str, Any]:
     """
     Deterministic offline fallback reasoning engine for local testing without cloud API keys.
-    Follows Phase 4 directives:
-    - Contextualizes views with meeting_purpose
+    Follows Phase 4 directives and Project Isolation:
+    - Contextualizes views with meeting_purpose and project_name
+    - Assigns tasks strictly categorized under project_id
     - If task has no explicitly mentioned date/time, sets deadline to 'unknown'
     - If share_technical_summary is False, omits deeply technical architecture details
     - Produces expansive, multi-point structured summaries covering all meeting topics, decisions, risks, and next steps.
@@ -1502,58 +1649,58 @@ def mock_offline_reasoning(
 
     if share_technical_summary:
         pm_view = (
-            f"### Executive & Technical Risk Assessment — {meeting_purpose}\n\n"
-            f"1. **Technical review and architectural risk assessment**: {primary_person} identified critical path requirements across the zero-leak tokenization engine and SQLite WAL database layer. Ensuring end-to-end data integrity during high concurrent intake is paramount.\n\n"
+            f"### Executive & Technical Risk Assessment — {meeting_purpose} ({project_name})\n\n"
+            f"1. **Technical review and architectural risk assessment**: {primary_person} identified critical path requirements across the zero-leak tokenization engine and SQLite WAL database layer for {project_name}. Ensuring end-to-end data integrity during high concurrent intake is paramount.\n\n"
             f"2. **Operational Constraints & Latency Bounds**: Reverse proxy routing and client-side polling must adhere to a strict latency ceiling (< 150ms). {secondary_person} highlighted potential throughput bottlenecks during concurrent multi-channel messaging.\n\n"
-            f"3. **Cross-Service Resource Allocation**: Development velocity depends on synchronization between frontend state machines and backend FastAPI services. Staged deployment verified across all 6 team environments.\n\n"
+            f"3. **Cross-Service Resource Allocation**: Development velocity depends on synchronization between frontend state machines and backend FastAPI services. Staged deployment verified across authorized members ({authorized_members_list}).\n\n"
             f"4. **Mitigation & Fallback Governance**: Ephemeral RAM wiping verified to execute immediately following batch analysis. Automated failover to deterministic local reasoning guarantees zero downtime even if upstream APIs experience degraded performance."
         )
         group_view = (
-            f"### Comprehensive Group Decisions & Strategic Deliverables — {meeting_purpose}\n\n"
+            f"### Comprehensive Group Decisions & Strategic Deliverables — {meeting_purpose} ({project_name})\n\n"
             f"• **Air-Gapped Zero-Leak Standard Ratified**: Unanimous consensus to enforce pre-LLM PII scrubbing across all meeting audio and closed captions. Raw participant identities will never leave local memory unmasked.\n\n"
             f"• **Phonetic ASR Normalization & Alias Expansion**: Deployed comprehensive 100+ phonetic variant dictionaries per participant to capture speech recognition misspellings before Presidio deny-list filtering.\n\n"
-            f"• **Direct Messaging Architecture & Channel Isolation**: Approved symmetric channel pair mapping (dm-user1-user2) alongside private, isolated AI assistant channels (dm-aegisbot-user) to prevent cross-profile message leakage.\n\n"
+            f"• **Project Isolation & Channel Governance**: Validated strict project isolation for {project_name} (ID: {project_id}). Tasks restricted strictly to authorized project members ({authorized_members_list}).\n\n"
             f"• **Action Item Extraction & Deadline Compliance**: Implemented strict anti-hallucination validation rules: any extracted action item lacking an explicit spoken date/time is permanently tagged as 'unknown' rather than hallucinated."
         )
         absent_view = (
-            f"### Absentee Comprehensive Catch-Up Dossier — {meeting_purpose}\n\n"
+            f"### Absentee Comprehensive Catch-Up Dossier — {meeting_purpose} ({project_name})\n\n"
             f"**Meeting Overview & Context**:\n"
-            f"The core engineering team convened for {meeting_purpose} to finalize system architecture, review security boundaries, and align on upcoming sprint milestones.\n\n"
+            f"The core engineering team convened for {meeting_purpose} under {project_name} to finalize system architecture, review security boundaries, and align on upcoming sprint milestones.\n\n"
             f"**Key Discussion Topics Covered**:\n"
             f"- **Security & Compliance**: {primary_person} presented validation test reports confirming 100% PII redaction across simulated meeting sessions.\n"
             f"- **Frontend & Communication Channels**: {secondary_person} demonstrated real-time multi-user communication, unread badge synchronization, and isolated direct messaging.\n"
             f"- **Milestone Status**: Core tasks are on schedule for the upcoming release, with high test coverage maintained across all critical execution paths.\n\n"
             f"**Immediate Actionable Next Steps**:\n"
-            f"- {secondary_person} will finalize dashboard integration and QA test signoff.\n"
+            f"- {secondary_person} will finalize dashboard integration and QA test signoff for {project_name}.\n"
             f"- {primary_person} will complete security audit documentation and verify cross-origin tunnel configurations."
         )
-        task1_title = "Complete frontend dashboard and proxy integration"
-        task2_title = "Review security audit logs and verify zero-leak compliance"
+        task1_title = f"Complete {project_name} dashboard and proxy integration"
+        task2_title = f"Review {project_name} security audit logs and verify zero-leak compliance"
     else:
         pm_view = (
-            f"### Executive overview & Strategic Alignment — {meeting_purpose}\n\n"
-            f"1. **Delivery Schedule Alignment**: Operational alignment achieved across all functional teams. Primary milestones confirmed with {primary_person}.\n\n"
+            f"### Executive overview & Strategic Alignment — {meeting_purpose} ({project_name})\n\n"
+            f"1. **Delivery Schedule Alignment**: Operational alignment achieved across all functional teams for {project_name}. Primary milestones confirmed with {primary_person}.\n\n"
             f"2. **Stakeholder Dependencies**: Cross-departmental coordination established with leadership to ensure frictionless rollout and change management.\n\n"
             f"3. **Resource & Budget Tracking**: Project resource allocation reviewed; all workstreams remain within targeted quarterly velocity projections.\n\n"
             f"4. **Risk Management**: Continuous monitoring enabled to identify timeline drift early and maintain team delivery commitments."
         )
         group_view = (
-            f"### Executive Summary & Team Alignments — {meeting_purpose}\n\n"
+            f"### Executive Summary & Team Alignments — {meeting_purpose} ({project_name})\n\n"
             f"• **Strategic Vision & Roadmap**: Confirmed core project objectives and strategic direction for {meeting_purpose}.\n\n"
             f"• **Key Milestone Approvals**: High-level deliverables approved for immediate execution with clear ownership delegated to team leads.\n\n"
             f"• **Cross-Team Collaboration**: Established weekly synchronization cadence and unified reporting standards across all involved stakeholders."
         )
         absent_view = (
-            f"### Executive Briefing for Absent Members — {meeting_purpose}\n\n"
+            f"### Executive Briefing for Absent Members — {meeting_purpose} ({project_name})\n\n"
             f"**Executive Context**:\n"
-            f"Brief strategic synchronization convened regarding {meeting_purpose}. Leadership and team leads reviewed overall project health and organizational milestones.\n\n"
+            f"Brief strategic synchronization convened regarding {meeting_purpose} ({project_name}). Leadership and team leads reviewed overall project health and organizational milestones.\n\n"
             f"**Summary of Discussion**:\n"
             f"- High-level operational progress reviewed and approved.\n"
             f"- Deliverables and responsibilities delegated to {secondary_person} and {primary_person}.\n"
             f"- Next milestone review scheduled for the upcoming operating cycle."
         )
-        task1_title = "Coordinate team deliverables and project updates"
-        task2_title = "Prepare executive briefing and status report"
+        task1_title = f"Coordinate {project_name} team deliverables and project updates"
+        task2_title = f"Prepare {project_name} executive briefing and status report"
 
     return {
         "pm_view": pm_view,
@@ -1564,11 +1711,13 @@ def mock_offline_reasoning(
                 "assignee": secondary_person,
                 "task": task1_title,
                 "deadline": deadline_1,
+                "project_id": project_id,
             },
             {
                 "assignee": primary_person,
                 "task": task2_title,
                 "deadline": deadline_2,
+                "project_id": project_id,
             },
         ],
         "user_alerts": [
@@ -1746,6 +1895,7 @@ class TaskCreatePayload(BaseModel):
     task: str = Field(..., description="Action item description")
     assignee: Optional[str] = "Unassigned"
     deadline: Optional[str] = "Unspecified"
+    project_id: Optional[int] = Field(None, description="Target project ID")
 
 
 class LoginRequest(BaseModel):
@@ -1765,6 +1915,7 @@ class MeetingCreateRequest(BaseModel):
     purpose: str = Field(..., description="Meeting topic or purpose")
     scheduled_time: Optional[str] = Field("Today", description="Scheduled meeting time")
     config_flags: Optional[Dict[str, Any]] = Field(None, description="Dynamic flags such as expected_participants")
+    project_id: Optional[int] = Field(None, description="Mandatory foreign key to Projects(id)")
 
 
 class AuthLoginPayload(BaseModel):
@@ -2474,14 +2625,16 @@ async def end_meeting_endpoint(
     expected_participants = payload.expected_participants if payload else None
     share_technical_summary = payload.share_technical_summary if payload else None
     meeting_purpose = payload.meeting_purpose if payload else None
+    meeting_project_id = 1
+    project_name = "Project A (Main)"
+    authorized_members_str = "Admin, Rohith, Mayank"
 
     # If meeting exists in SQLite, populate missing configs from Meetings table
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT purpose, config_flags FROM Meetings WHERE id = ?", (mid_int,))
+        cursor.execute("SELECT purpose, config_flags, project_id FROM Meetings WHERE id = ?", (mid_int,))
         m_row = cursor.fetchone()
-        conn.close()
         if m_row:
             if meeting_purpose is None and m_row[0]:
                 meeting_purpose = m_row[0]
@@ -2491,6 +2644,27 @@ async def end_meeting_endpoint(
                     expected_participants = flags["expected_participants"]
                 if share_technical_summary is None and "share_technical_summary" in flags:
                     share_technical_summary = flags["share_technical_summary"]
+            if m_row[2]:
+                meeting_project_id = m_row[2]
+
+        # Query Project Name
+        cursor.execute("SELECT name FROM Projects WHERE id = ?", (meeting_project_id,))
+        p_row = cursor.fetchone()
+        if p_row and p_row[0]:
+            project_name = p_row[0]
+
+        # Query Authorized Members for this project
+        cursor.execute("""
+            SELECT u.canonical_name
+            FROM ProjectMembers pm
+            JOIN Users u ON u.id = pm.user_id
+            WHERE pm.project_id = ?
+            ORDER BY u.canonical_name ASC
+        """, (meeting_project_id,))
+        m_rows = cursor.fetchall()
+        if m_rows:
+            authorized_members_str = ", ".join([r[0] for r in m_rows if r[0]])
+        conn.close()
     except Exception as e:
         logger.debug(f"Could not load meeting configs from SQLite: {e}")
 
@@ -2533,6 +2707,9 @@ async def end_meeting_endpoint(
             masked_text,
             meeting_purpose=meeting_purpose,
             share_technical_summary=share_technical_summary,
+            project_name=project_name,
+            authorized_members_list=authorized_members_str,
+            project_id=meeting_project_id,
         )
     except Exception as e:
         logger.error(f"Error querying Featherless AI during end-of-meeting batch: {e}")
@@ -2562,16 +2739,17 @@ async def end_meeting_endpoint(
         cursor.execute(
             """
             UPDATE Meetings
-            SET pm_view = ?, group_view = ?, absent_view = ?, status = 'completed'
+            SET pm_view = ?, group_view = ?, absent_view = ?, status = 'completed',
+                project_id = COALESCE(project_id, ?)
             WHERE id = ?
             """,
-            (pm_view_text, group_view_text, absent_view_text, mid_int),
+            (pm_view_text, group_view_text, absent_view_text, meeting_project_id, mid_int),
         )
     else:
         cursor.execute(
             """
-            INSERT INTO Meetings (id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'completed')
+            INSERT INTO Meetings (id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status, project_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?)
             """,
             (
                 mid_int,
@@ -2584,13 +2762,14 @@ async def end_meeting_endpoint(
                 pm_view_text,
                 group_view_text,
                 absent_view_text,
+                meeting_project_id,
             ),
         )
     conn.commit()
     conn.close()
 
     # Save tasks
-    saved_ids = save_tasks_to_db(rehydrated_output.get("tasks", []), meeting_id=mid_int)
+    saved_ids = save_tasks_to_db(rehydrated_output.get("tasks", []), meeting_id=mid_int, project_id=meeting_project_id)
 
     # CRITICALLY: Delete the raw transcript buffer from RAM immediately.
     # Never save the raw transcript to the database.
@@ -2990,40 +3169,48 @@ def get_auth_users_endpoint(current_user: dict = Depends(get_current_user)):
 @app.get("/api/tasks")
 def get_tasks_endpoint(
     meeting_id: Optional[int] = None,
+    project_id: Optional[int] = None,
     user_id: Optional[int] = None,
     user: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Strict Privacy Filtering:
+    Strict Project & Privacy Filtering:
+    - Performs SQL JOIN on ProjectMembers to strictly return only tasks linked to projects the requesting user is a member of.
     - Normal user: Strictly filters by authenticated user's ID (ignoring any requested user_id).
-    - Admin: Can view all tasks or filter by user_id/meeting_id.
+    - Admin: Can view all tasks across authorized projects or filter by user_id/user/project_id/meeting_id.
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
     query = """
-        SELECT t.id, t.meeting_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
-               u.canonical_name as assignee
+        SELECT t.id, t.meeting_id, t.project_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+               u.canonical_name as assignee, p.name as project_name
         FROM Tasks t
+        INNER JOIN ProjectMembers pm ON pm.project_id = t.project_id AND pm.user_id = ?
+        LEFT JOIN Projects p ON p.id = t.project_id
         LEFT JOIN Users u ON u.id = t.assignee_id
     """
     conditions = []
-    params = []
+    params = [current_user["id"]]
 
     if current_user["role"] != "admin":
         # Strict privacy enforcement: non-admins ONLY see their own tasks
         conditions.append("t.assignee_id = ?")
         params.append(current_user["id"])
     else:
-        # Admin can view all or filter
+        # Admin can view all tasks in authorized projects or filter
         if user_id:
             conditions.append("t.assignee_id = ?")
             params.append(user_id)
         elif user:
             conditions.append("(LOWER(u.canonical_name) = LOWER(?) OR LOWER(u.canonical_name) LIKE LOWER(?))")
             params.extend([user, f"%{user}%"])
+
+    if project_id:
+        conditions.append("t.project_id = ?")
+        params.append(project_id)
 
     if meeting_id:
         conditions.append("t.meeting_id = ?")
@@ -3042,12 +3229,21 @@ def get_tasks_endpoint(
 
 
 @app.post("/tasks", status_code=status.HTTP_201_CREATED)
-@app.post("/api/tasks")
+@app.post("/api/tasks", status_code=status.HTTP_201_CREATED)
 def create_task_endpoint(
     payload: TaskCreatePayload,
     current_user: dict = Depends(get_current_user),
 ):
-    """Allows manual creation of an action item linked to assignee_id."""
+    """Allows manual creation of an action item linked to assignee_id and project_id."""
+    pid = payload.project_id or 1
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM ProjectMembers WHERE project_id = ? AND user_id = ?", (pid, current_user["id"]))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden: You are not authorized for this project")
+    conn.close()
+
     assignee_val = payload.assignee or current_user["canonical_name"]
     assignee_id = get_user_id_by_name(assignee_val) or current_user["id"]
     ids = save_tasks_to_db([{
@@ -3056,22 +3252,41 @@ def create_task_endpoint(
         "assignee_id": assignee_id,
         "deadline": payload.deadline or "unknown",
         "status": "pending",
-    }])
+        "project_id": pid,
+    }], project_id=pid)
     return {"status": "created", "task_id": ids[0]}
 
 
 @app.get("/meetings")
 @app.get("/api/meetings")
-def get_meetings_endpoint(current_user: dict = Depends(get_current_user)):
+def get_meetings_endpoint(
+    project_id: Optional[int] = None,
+    current_user: dict = Depends(get_current_user),
+):
     """
-    Strict Privacy Filtering for Meetings:
+    Strict Privacy & Project Filtering for Meetings:
+    - Returns only meetings for projects the user is an authorized member of.
     - Normal user: Returns only meetings where the user is an expected participant or has assigned tasks.
-    - Admin: Returns all meetings.
+    - Admin: Returns all meetings within authorized projects.
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status FROM Meetings ORDER BY id DESC")
+
+    query = """
+        SELECT m.id, m.purpose, m.scheduled_time, m.config_flags, m.pm_view, m.group_view, m.absent_view, m.status, m.project_id,
+               p.name as project_name
+        FROM Meetings m
+        INNER JOIN ProjectMembers pm ON pm.project_id = m.project_id AND pm.user_id = ?
+        LEFT JOIN Projects p ON p.id = m.project_id
+    """
+    params = [current_user["id"]]
+    if project_id:
+        query += " WHERE m.project_id = ?"
+        params.append(project_id)
+    query += " ORDER BY m.id DESC"
+
+    cursor.execute(query, tuple(params))
     all_meetings = cursor.fetchall()
 
     if current_user["role"] == "admin":
@@ -3131,13 +3346,13 @@ def get_single_meeting_endpoint(
 ):
     """
     Returns full details, summaries (pm_view, group_view, absent_view), and tasks
-    for a specific meeting, protected by strict privacy filtering.
+    for a specific meeting, protected by strict privacy and project filtering.
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status FROM Meetings WHERE id = ?",
+        "SELECT id, purpose, scheduled_time, config_flags, pm_view, group_view, absent_view, status, project_id FROM Meetings WHERE id = ?",
         (meeting_id,),
     )
     row = cursor.fetchone()
@@ -3146,6 +3361,14 @@ def get_single_meeting_endpoint(
         raise HTTPException(status_code=404, detail="Meeting not found")
 
     m_dict = dict(row)
+
+    # Check project membership
+    if m_dict.get("project_id"):
+        cursor.execute("SELECT 1 FROM ProjectMembers WHERE project_id = ? AND user_id = ?", (m_dict["project_id"], current_user["id"]))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=403, detail="Forbidden: You do not have access to this project")
+
     cfg = {}
     try:
         cfg = json.loads(m_dict["config_flags"]) if m_dict["config_flags"] else {}
@@ -3182,9 +3405,10 @@ def get_single_meeting_endpoint(
     if current_user["role"] == "admin":
         cursor.execute(
             """
-            SELECT t.id, t.meeting_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
-                   u.canonical_name as assignee
+            SELECT t.id, t.meeting_id, t.project_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+                   u.canonical_name as assignee, p.name as project_name
             FROM Tasks t
+            LEFT JOIN Projects p ON p.id = t.project_id
             LEFT JOIN Users u ON u.id = t.assignee_id
             WHERE t.meeting_id = ?
             ORDER BY t.id ASC
@@ -3194,9 +3418,10 @@ def get_single_meeting_endpoint(
     else:
         cursor.execute(
             """
-            SELECT t.id, t.meeting_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
-                   u.canonical_name as assignee
+            SELECT t.id, t.meeting_id, t.project_id, t.assignee_id, t.task, t.deadline, t.status, t.created_at,
+                   u.canonical_name as assignee, p.name as project_name
             FROM Tasks t
+            LEFT JOIN Projects p ON p.id = t.project_id
             LEFT JOIN Users u ON u.id = t.assignee_id
             WHERE t.meeting_id = ? AND t.assignee_id = ?
             ORDER BY t.id ASC
@@ -3209,19 +3434,40 @@ def get_single_meeting_endpoint(
     return m_dict
 
 
+@app.post("/create_meeting", status_code=status.HTTP_201_CREATED)
+@app.post("/api/create_meeting", status_code=status.HTTP_201_CREATED)
 @app.post("/meetings", status_code=status.HTTP_201_CREATED)
 @app.post("/api/meetings", status_code=status.HTTP_201_CREATED)
 def create_meeting_endpoint(
     payload: MeetingCreateRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Creates a new meeting record in SQLite."""
+    """Creates a new meeting record in SQLite with mandatory project authorization."""
+    if not payload.project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="project_id is required",
+        )
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+
+    # Access control: Verify user is authorized for this specific project
+    cursor.execute(
+        "SELECT 1 FROM ProjectMembers WHERE project_id = ? AND user_id = ?",
+        (payload.project_id, current_user["id"]),
+    )
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Forbidden: User '{current_user['canonical_name']}' is not an authorized member of project {payload.project_id}.",
+        )
+
     cfg_json = json.dumps(payload.config_flags or {"expected_participants": [current_user["id"]]})
     cursor.execute(
-        "INSERT INTO Meetings (purpose, scheduled_time, config_flags) VALUES (?, ?, ?)",
-        (payload.purpose, payload.scheduled_time, cfg_json),
+        "INSERT INTO Meetings (purpose, scheduled_time, config_flags, project_id) VALUES (?, ?, ?, ?)",
+        (payload.purpose, payload.scheduled_time, cfg_json, payload.project_id),
     )
     conn.commit()
     new_id = cursor.lastrowid
@@ -3233,6 +3479,7 @@ def create_meeting_endpoint(
             "purpose": payload.purpose,
             "scheduled_time": payload.scheduled_time,
             "config_flags": cfg_json,
+            "project_id": payload.project_id,
         },
     }
 
@@ -3240,11 +3487,17 @@ def create_meeting_endpoint(
 @app.get("/projects")
 @app.get("/api/projects")
 def get_projects_endpoint(current_user: dict = Depends(get_current_user)):
-    """Returns projects list."""
+    """Returns projects list that the authenticated user is an authorized member of."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM Projects ORDER BY id ASC")
+    cursor.execute("""
+        SELECT p.id, p.name
+        FROM Projects p
+        JOIN ProjectMembers pm ON pm.project_id = p.id
+        WHERE pm.user_id = ?
+        ORDER BY p.id ASC
+    """, (current_user["id"],))
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]

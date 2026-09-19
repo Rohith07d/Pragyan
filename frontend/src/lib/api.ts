@@ -50,6 +50,7 @@ export interface AuthUser {
 export interface TaskItem {
   id: number;
   meeting_id?: number;
+  project_id?: number;
   assignee_id?: number;
   task: string;
   assignee?: string;
@@ -66,6 +67,8 @@ export interface MeetingItem {
   scheduled_time: string;
   config_flags?: any;
   status?: string;
+  project_id?: number;
+  project_name?: string;
   pm_view?: string;
   group_view?: string;
   absent_view?: string;
@@ -77,6 +80,8 @@ export interface SingleMeetingResponse {
   scheduled_time: string;
   config_flags?: string;
   config?: any;
+  project_id?: number;
+  project_name?: string;
   pm_view?: string;
   group_view?: string;
   absent_view?: string;
@@ -160,8 +165,9 @@ export function logoutUser() {
 }
 
 // Data APIs
-export async function fetchTasks(userOnly: boolean = true): Promise<TaskItem[]> {
-  const res = await api.get("/api/tasks");
+export async function fetchTasks(projectId?: number): Promise<TaskItem[]> {
+  const params = projectId ? { project_id: projectId } : {};
+  const res = await api.get("/api/tasks", { params });
   return res.data || [];
 }
 
@@ -170,18 +176,35 @@ export async function updateTaskStatus(taskId: number, status: "completed" | "pe
   return res.data;
 }
 
-export async function createTask(task: string, deadline: string = "unknown", assigneeId?: number): Promise<any> {
+export async function createTask(
+  task: string,
+  deadline: string = "unknown",
+  assigneeId?: number,
+  projectId?: number
+): Promise<any> {
   const res = await api.post("/api/tasks", {
     task,
     deadline,
     assignee_id: assigneeId,
+    project_id: projectId,
     status: "pending",
   });
   return res.data;
 }
 
-export async function fetchMeetings(): Promise<MeetingItem[]> {
-  const res = await api.get("/api/meetings");
+export async function createMeeting(payload: {
+  purpose: string;
+  scheduled_time?: string;
+  config_flags?: any;
+  project_id: number;
+}): Promise<any> {
+  const res = await api.post("/create_meeting", payload);
+  return res.data;
+}
+
+export async function fetchMeetings(projectId?: number): Promise<MeetingItem[]> {
+  const params = projectId ? { project_id: projectId } : {};
+  const res = await api.get("/api/meetings", { params });
   return res.data || [];
 }
 
@@ -238,6 +261,7 @@ export async function joinMeeting(payload: {
   meeting_purpose?: string;
   bot_name?: string;
   duration_sec?: number;
+  project_id?: number;
 }): Promise<any> {
   const res = await api.post("/join", payload);
   return res.data;
@@ -251,6 +275,7 @@ export async function scheduleMeeting(payload: {
   meeting_purpose?: string;
   bot_name?: string;
   duration_sec?: number;
+  project_id?: number;
 }): Promise<any> {
   const res = await api.post("/schedule", payload);
   return res.data;
