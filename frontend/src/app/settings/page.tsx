@@ -26,14 +26,69 @@ interface WorkProfile {
   focusArea: string;
 }
 
-const DEFAULT_PROFILE: WorkProfile = {
-  jobTitle: "Staff Privacy Infrastructure Engineer",
-  department: "Core Security & Platform Architecture",
-  githubRepo: "https://github.com/aegis-enterprise/core-privacy-pipeline",
-  jobDescription:
-    "Architect and maintain zero-leak PII anonymization boundaries, real-time closed-caption mutation streams, and autonomous meeting task routing for distributed team productivity.",
-  focusArea: "Distributed Systems, PII Security, Presidio & ASR",
+const USER_PROFILES: Record<string, WorkProfile> = {
+  admin: {
+    jobTitle: "Enterprise Systems Administrator",
+    department: "Enterprise Security & Infrastructure",
+    githubRepo: "https://github.com/aegis-enterprise/platform-governance",
+    jobDescription:
+      "Manage role-based access controls, organizational security postures, and multi-tenant pipeline deployments across internal engineering teams.",
+    focusArea: "RBAC Governance, Security Auditing, Platform Operations",
+  },
+  rohith: {
+    jobTitle: "Engineering Lead",
+    department: "Core Security & Platform Architecture",
+    githubRepo: "https://github.com/aegis-enterprise/core-privacy-pipeline",
+    jobDescription:
+      "Architect and maintain zero-leak PII anonymization boundaries, real-time closed-caption mutation streams, and autonomous meeting task routing for distributed team productivity.",
+    focusArea: "Distributed Systems, PII Security, Presidio & ASR",
+  },
+  mayank: {
+    jobTitle: "Tech Lead",
+    department: "Backend Pipeline & Presidio Integration",
+    githubRepo: "https://github.com/aegis-enterprise/presidio-airgap-gateway",
+    jobDescription:
+      "Lead backend architecture, live caption streaming ingestion, and token-level PII sanitization before cloud reasoning.",
+    focusArea: "FastAPI, Presidio PII Masking, Featherless LLM Bridge",
+  },
+  sambhav: {
+    jobTitle: "Frontend Specialist",
+    department: "Design Systems & Console Experience",
+    githubRepo: "https://github.com/aegis-enterprise/aegis-console-ui",
+    jobDescription:
+      "Build high-contrast, responsive enterprise interfaces, live meeting briefing hubs, and cross-client messaging systems.",
+    focusArea: "Next.js, Tailwind CSS, Turbopack, Real-Time Collaboration",
+  },
+  sanjeet: {
+    jobTitle: "Security Engineer",
+    department: "Infosec & Zero-Leak Auditing",
+    githubRepo: "https://github.com/aegis-enterprise/zero-leak-audits",
+    jobDescription:
+      "Perform continuous penetration tests, verify ephemeral memory scrubbing, and audit zero-leak cryptographic air-gaps.",
+    focusArea: "Zero-Trust Architecture, Cryptographic Verification, RAM Scrubbing",
+  },
+  pranav: {
+    jobTitle: "Cloud Systems Engineer",
+    department: "Cloud Infrastructure & APScheduler",
+    githubRepo: "https://github.com/aegis-enterprise/cloud-scheduler-infra",
+    jobDescription:
+      "Oversee containerized cloud execution, automated meeting scheduling jobs, and resilient tunnel proxy architecture.",
+    focusArea: "Cloud Infrastructure, APScheduler, Microservices Reliability",
+  },
 };
+
+const DEFAULT_PROFILE = USER_PROFILES.rohith;
+
+function getUserSlug(user: AuthUser | null): string {
+  if (!user) return "rohith";
+  const name = (user.canonical_name || user.name || "").toLowerCase();
+  if (name.includes("admin")) return "admin";
+  if (name.includes("mayank")) return "mayank";
+  if (name.includes("sambhav")) return "sambhav";
+  if (name.includes("sanjeet")) return "sanjeet";
+  if (name.includes("pranav")) return "pranav";
+  return "rohith";
+}
 
 export default function SettingsPage() {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -42,22 +97,27 @@ export default function SettingsPage() {
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   useEffect(() => {
-    setUser(getCurrentUser());
+    const currentUser = getCurrentUser();
+    setUser(currentUser);
 
-    // Load persisted work profile from localStorage
-    const saved = localStorage.getItem("aegis_work_profile");
+    const slug = getUserSlug(currentUser);
+    const fallbackProfile = USER_PROFILES[slug] || DEFAULT_PROFILE;
+
+    // Load persisted work profile for this specific user from localStorage
+    const saved = localStorage.getItem(`aegis_work_profile_${slug}`);
     if (saved) {
       try {
         setProfile(JSON.parse(saved));
-      } catch {
-        // use default
-      }
+        return;
+      } catch {}
     }
+    setProfile(fallbackProfile);
   }, []);
 
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
-    localStorage.setItem("aegis_work_profile", JSON.stringify(profile));
+    const slug = getUserSlug(user);
+    localStorage.setItem(`aegis_work_profile_${slug}`, JSON.stringify(profile));
     setIsEditing(false);
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 3000);

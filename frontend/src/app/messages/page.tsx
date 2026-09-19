@@ -49,12 +49,26 @@ interface TeamMember {
 }
 
 export const ALL_TEAM_MEMBERS: TeamMember[] = [
+  { id: "admin", canonicalName: "Admin", fullName: "Admin Console", role: "System Administrator" },
   { id: "rohith", canonicalName: "Rohith", fullName: "Rohith Dharmavarapu", role: "Engineering Lead" },
   { id: "mayank", canonicalName: "Mayank", fullName: "Mayank Sachdeva", role: "Tech Lead" },
   { id: "sambhav", canonicalName: "Sambhav", fullName: "Sambhav Chordia", role: "Frontend Specialist" },
   { id: "sanjeet", canonicalName: "Sanjeet", fullName: "Sanjeet Kumar", role: "Security Engineer" },
   { id: "pranav", canonicalName: "Pranav", fullName: "Pranav Sai", role: "Cloud Systems" },
 ];
+
+export function getCanonicalUserSlug(nameOrUser: string | AuthUser | null | undefined): string {
+  if (!nameOrUser) return "unknown";
+  const str = typeof nameOrUser === "string" ? nameOrUser : (nameOrUser.canonical_name || nameOrUser.name || "");
+  const lower = str.trim().toLowerCase();
+  if (lower.includes("admin")) return "admin";
+  if (lower.includes("rohith")) return "rohith";
+  if (lower.includes("mayank")) return "mayank";
+  if (lower.includes("sambhav")) return "sambhav";
+  if (lower.includes("sanjeet")) return "sanjeet";
+  if (lower.includes("pranav")) return "pranav";
+  return lower.replace(/[^a-z0-9]/g, "") || "user";
+}
 
 export function isUserSelf(
   senderName: string,
@@ -71,6 +85,11 @@ export function isUserSelf(
   if (!s || (!c && !n)) return false;
   if (s === c || s === n) return true;
 
+  // Canonical slug equality (e.g. "Mayank Sachdeva" vs "Mayank")
+  const sSlug = getCanonicalUserSlug(s);
+  const uSlug = getCanonicalUserSlug(user);
+  if (sSlug !== "unknown" && sSlug === uSlug) return true;
+
   // Partial match: e.g. "Mayank Sachdeva" contains "Mayank"
   if (c && (s.includes(c) || c.includes(s))) return true;
   if (n && (s.includes(n) || n.includes(s))) return true;
@@ -84,15 +103,15 @@ export function isUserSelf(
   return false;
 }
 
-export function getDmChannelId(user1: string, user2: string): string {
-  const u1 = user1.toLowerCase().trim();
-  const u2 = user2.toLowerCase().trim();
-  const sorted = [u1, u2].sort();
+export function getDmChannelId(user1: string | AuthUser | null, user2: string | AuthUser | null): string {
+  const s1 = getCanonicalUserSlug(user1);
+  const s2 = getCanonicalUserSlug(user2);
+  const sorted = [s1, s2].sort();
   return `dm-${sorted[0]}-${sorted[1]}`;
 }
 
 export function buildChannelsForUser(user: AuthUser | null): Channel[] {
-  const userCanonical = user?.canonical_name || user?.name || "";
+  const userSlug = getCanonicalUserSlug(user);
 
   const baseChannels: Channel[] = [
     {
@@ -120,13 +139,17 @@ export function buildChannelsForUser(user: AuthUser | null): Channel[] {
 
   // Direct messages: Filter out the logged-in user so they NEVER see themselves in their DM list!
   const targetMembers = ALL_TEAM_MEMBERS.filter((m) => {
-    if (!userCanonical) return true;
-    return !isUserSelf(m.canonicalName, null, user) && !isUserSelf(m.fullName, null, user);
+    if (!user) return true;
+    return (
+      !isUserSelf(m.canonicalName, null, user) &&
+      !isUserSelf(m.fullName, null, user) &&
+      getCanonicalUserSlug(m.canonicalName) !== userSlug
+    );
   });
 
   const dmChannels: Channel[] = targetMembers.map((m) => {
-    // Generate symmetric channel ID, e.g. Mayank <-> Rohith is dm-mayank-rohith
-    const channelId = userCanonical ? getDmChannelId(userCanonical, m.canonicalName) : `dm-${m.id}`;
+    // Generate deterministic symmetric channel ID, e.g. Mayank <-> Rohith is dm-mayank-rohith
+    const channelId = user ? getDmChannelId(user, m.canonicalName) : `dm-${m.id}`;
     return {
       id: channelId,
       name: m.fullName,
@@ -137,9 +160,10 @@ export function buildChannelsForUser(user: AuthUser | null): Channel[] {
     };
   });
 
-  // Always append AegisBot
+  // User-scoped private AegisBot channel
+  const botChannelId = userSlug !== "unknown" ? `dm-aegisbot-${userSlug}` : "dm-aegisbot";
   dmChannels.push({
-    id: "dm-aegisbot",
+    id: botChannelId,
     name: "AegisBot Assistant",
     type: "dm" as const,
     unread: 0,
@@ -211,14 +235,23 @@ export default function MessagesPage() {
     markChannelAsRead(channelId);
   };
 
+  // Validate activeChannelId: if not present in current user's channels, reset to meeting-briefs
+  useEffect(() => {
+    if (channels.length > 0 && !channels.some((c) => c.id === activeChannelId)) {
+      setActiveChannelId("meeting-briefs");
+    }
+  }, [channels, activeChannelId]);
+
   useEffect(() => {
     const user = getCurrentUser();
     setCurrentUser(user);
     const freshChannels = buildChannelsForUser(user);
+    const userSlug = getCanonicalUserSlug(user);
+    const unreadKey = userSlug !== "unknown" ? `aegis_channel_unread_map_${userSlug}` : "aegis_channel_unread_map";
 
     // Read saved channel unread map if available
     try {
-      const savedMap = localStorage.getItem("aegis_channel_unread_map");
+      const savedMap = localStorage.getItem(unreadKey);
       if (savedMap) {
         const parsed = JSON.parse(savedMap);
         setChannels(
@@ -234,6 +267,14 @@ export default function MessagesPage() {
     setChannels(freshChannels);
     // First load: Mark initially opened channel as read
     markChannelAsRead(activeChannelId);
+
+    const handleAuthChange = () => {
+      const updatedUser = getCurrentUser();
+      setCurrentUser(updatedUser);
+      setChannels(buildChannelsForUser(updatedUser));
+    };
+    window.addEventListener("storage", handleAuthChange);
+    return () => window.removeEventListener("storage", handleAuthChange);
   }, []);
 
   // Synchronize unread counts to localStorage and broadcast event safely outside render phase
@@ -241,9 +282,11 @@ export default function MessagesPage() {
     let isMounted = true;
     const total = channels.reduce((sum, c) => sum + c.unread, 0);
     const unreadMap = channels.reduce((acc, c) => ({ ...acc, [c.id]: c.unread }), {});
+    const userSlug = getCanonicalUserSlug(currentUser);
+    const unreadKey = userSlug !== "unknown" ? `aegis_channel_unread_map_${userSlug}` : "aegis_channel_unread_map";
     try {
       localStorage.setItem("aegis_unread_messages_count", String(total));
-      localStorage.setItem("aegis_channel_unread_map", JSON.stringify(unreadMap));
+      localStorage.setItem(unreadKey, JSON.stringify(unreadMap));
     } catch {}
     const timer = setTimeout(() => {
       if (isMounted) {
@@ -254,7 +297,7 @@ export default function MessagesPage() {
       isMounted = false;
       clearTimeout(timer);
     };
-  }, [channels]);
+  }, [channels, currentUser]);
 
   // Poll backend for fresh channel messages every 3 seconds so other deployed users' messages appear live
   useEffect(() => {
@@ -497,7 +540,7 @@ export default function MessagesPage() {
                       .filter((c) => c.type === "dm")
                       .map((c) => {
                         const isActive = c.id === activeChannelId;
-                        const isAegis = c.id === "dm-aegisbot";
+                        const isAegis = c.id === "dm-aegisbot" || c.id.startsWith("dm-aegisbot");
                         return (
                           <button
                             key={c.id}
@@ -542,7 +585,7 @@ export default function MessagesPage() {
                 <div className="flex items-center gap-2.5">
                   {activeChannel.type === "channel" ? (
                     <Hash className="w-4 h-4 text-zinc-400" />
-                  ) : activeChannel.id === "dm-aegisbot" ? (
+                  ) : activeChannel.id === "dm-aegisbot" || activeChannel.id.startsWith("dm-aegisbot") ? (
                     <Bot className="w-4 h-4 text-emerald-400" />
                   ) : (
                     <div className="w-6 h-6 rounded-full bg-zinc-800 text-white flex items-center justify-center text-xs font-bold">

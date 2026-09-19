@@ -364,7 +364,7 @@ export default function MeetingsPage() {
                 <span className="text-[11px] text-gray-400">{latestResult.timestamp}</span>
               </div>
 
-              <div className="text-xs text-gray-300 leading-relaxed bg-zinc-900/60 p-4 rounded-xl border border-zinc-800">
+              <div className="text-xs text-gray-300 leading-relaxed bg-zinc-900/60 p-4 rounded-xl border border-zinc-800 whitespace-pre-wrap">
                 {latestResult.meeting_summary || "No summary text generated."}
               </div>
 

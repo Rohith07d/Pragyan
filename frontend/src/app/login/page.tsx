@@ -108,6 +108,51 @@ export default function LoginPage() {
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
+
+          {/* Quick Profile Login Switcher */}
+          <div className="pt-4 border-t border-gray-100">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-gray-400 text-center mb-2.5">
+              Quick Switch Team Profiles
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {[
+                { name: "Rohith", pwd: "rohith123", role: "Engineering Lead" },
+                { name: "Mayank", pwd: "mayank123", role: "Tech Lead" },
+                { name: "Sambhav", pwd: "sambhav123", role: "Frontend Specialist" },
+                { name: "Sanjeet", pwd: "sanjeet123", role: "Security Engineer" },
+                { name: "Pranav", pwd: "pranav123", role: "Cloud Systems" },
+                { name: "Admin", pwd: "admin123", role: "System Admin" },
+              ].map((p) => (
+                <button
+                  key={p.name}
+                  type="button"
+                  disabled={isLoading}
+                  onClick={async () => {
+                    setIdentifier(p.name);
+                    setPassword(p.pwd);
+                    setIsLoading(true);
+                    setError(null);
+                    try {
+                      await loginUser(p.name, p.pwd);
+                      router.push("/dashboard");
+                    } catch (err: any) {
+                      setError(err.response?.data?.detail || "Login failed");
+                    } finally {
+                      setIsLoading(false);
+                    }
+                  }}
+                  className="p-2 rounded-xl bg-gray-50 hover:bg-gray-100 border border-gray-200 text-left transition-colors cursor-pointer group"
+                >
+                  <span className="block text-xs font-semibold text-gray-900 group-hover:text-black">
+                    {p.name}
+                  </span>
+                  <span className="block text-[10px] text-gray-500 truncate">
+                    {p.role}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* Security Notice */}

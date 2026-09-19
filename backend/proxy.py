@@ -818,6 +818,74 @@ def init_db():
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON Messages(channel_id)")
 
+    # Ensure sample meetings have rich, comprehensive multi-point summaries
+    meeting_1_pm = (
+        "### Executive & Technical Risk Assessment — AegisMeet Architecture Sync\n\n"
+        "1. **Core Infrastructure Dependencies**: Rohith identified critical path requirements across the zero-leak tokenization engine and SQLite WAL database layer. Ensuring end-to-end data integrity during high concurrent intake is paramount.\n\n"
+        "2. **Operational Constraints & Latency Bounds**: Reverse proxy routing and client-side polling must adhere to a strict latency ceiling (< 150ms). Mayank highlighted potential throughput bottlenecks during concurrent multi-channel messaging.\n\n"
+        "3. **Cross-Service Resource Allocation**: Development velocity depends on synchronization between frontend state machines and backend FastAPI services. Staged deployment verified across all 6 team environments.\n\n"
+        "4. **Mitigation & Fallback Governance**: Ephemeral RAM wiping verified to execute immediately following batch analysis. Automated failover to deterministic local reasoning guarantees zero downtime even if upstream APIs experience degraded performance."
+    )
+    meeting_1_group = (
+        "### Comprehensive Group Decisions & Strategic Deliverables — AegisMeet Architecture Sync\n\n"
+        "• **Air-Gapped Zero-Leak Standard Ratified**: Unanimous consensus to enforce pre-LLM PII scrubbing across all meeting audio and closed captions. Raw participant identities will never leave local memory unmasked.\n\n"
+        "• **Phonetic ASR Normalization & Alias Expansion**: Deployed comprehensive 100+ phonetic variant dictionaries per participant to capture speech recognition misspellings before Presidio deny-list filtering.\n\n"
+        "• **Direct Messaging Architecture & Channel Isolation**: Approved symmetric channel pair mapping (dm-user1-user2) alongside private, isolated AI assistant channels (dm-aegisbot-user) to prevent cross-profile message leakage.\n\n"
+        "• **Action Item Extraction & Deadline Compliance**: Implemented strict anti-hallucination validation rules: any extracted action item lacking an explicit spoken date/time is permanently tagged as 'unknown' rather than hallucinated."
+    )
+    meeting_1_absent = (
+        "### Absentee Comprehensive Catch-Up Dossier — AegisMeet Architecture Sync\n\n"
+        "**Meeting Overview & Context**:\n"
+        "The core engineering team convened for AegisMeet Architecture Sync to finalize system architecture, review security boundaries, and align on upcoming sprint milestones.\n\n"
+        "**Key Discussion Topics Covered**:\n"
+        "- **Security & Compliance**: Rohith presented validation test reports confirming 100% PII redaction across simulated meeting sessions.\n"
+        "- **Frontend & Communication Channels**: Sambhav demonstrated real-time multi-user communication, unread badge synchronization, and isolated direct messaging.\n"
+        "- **Milestone Status**: Core tasks are on schedule for the upcoming release, with high test coverage maintained across all critical execution paths.\n\n"
+        "**Immediate Actionable Next Steps**:\n"
+        "- Sambhav will finalize dashboard integration and QA test signoff.\n"
+        "- Rohith will complete security audit documentation and verify cross-origin tunnel configurations."
+    )
+
+    cursor.execute("""
+        UPDATE Meetings
+        SET pm_view = ?, group_view = ?, absent_view = ?, status = 'completed'
+        WHERE id = 1 AND (pm_view IS NULL OR pm_view = '')
+    """, (meeting_1_pm, meeting_1_group, meeting_1_absent))
+
+    meeting_2_pm = (
+        "### Executive Operational Overview & Risk Matrix — Sprint Review & Milestones\n\n"
+        "1. **Delivery Schedule Alignment**: Operational alignment achieved across all functional teams. Primary milestones confirmed with Mayank and Sambhav.\n\n"
+        "2. **Stakeholder Dependencies**: Cross-departmental coordination established with leadership to ensure frictionless rollout and change management.\n\n"
+        "3. **Resource & Budget Tracking**: Project resource allocation reviewed; all workstreams remain within targeted quarterly velocity projections.\n\n"
+        "4. **Risk Management**: Continuous monitoring enabled to identify timeline drift early and maintain team delivery commitments."
+    )
+    meeting_2_group = (
+        "### Executive Summary & Team Alignments — Sprint Review & Milestones\n\n"
+        "• **Strategic Vision & Roadmap**: Confirmed core project objectives and strategic direction for Sprint Review & Milestones.\n\n"
+        "• **Key Milestone Approvals**: High-level deliverables approved for immediate execution with clear ownership delegated to team leads.\n\n"
+        "• **Cross-Team Collaboration**: Established weekly synchronization cadence and unified reporting standards across all involved stakeholders."
+    )
+    meeting_2_absent = (
+        "### Executive Briefing for Absent Members — Sprint Review & Milestones\n\n"
+        "**Executive Context**:\n"
+        "Strategic synchronization convened regarding Sprint Review & Milestones. Leadership and team leads reviewed overall project health and organizational milestones.\n\n"
+        "**Summary of Discussion**:\n"
+        "- High-level operational progress reviewed and approved.\n"
+        "- Deliverables and responsibilities delegated to Mayank and Sambhav.\n"
+        "- Next milestone review scheduled for the upcoming operating cycle."
+    )
+
+    cursor.execute("""
+        UPDATE Meetings
+        SET pm_view = ?, group_view = ?, absent_view = ?, status = 'completed'
+        WHERE id = 2 AND (pm_view IS NULL OR pm_view = '')
+    """, (meeting_2_pm, meeting_2_group, meeting_2_absent))
+
+    # Migrate legacy single-name DM channel IDs to symmetric paired channels
+    cursor.execute("UPDATE Messages SET channel_id = 'dm-mayank-rohith' WHERE channel_id = 'dm-mayank'")
+    cursor.execute("UPDATE Messages SET channel_id = 'dm-rohith-sambhav' WHERE channel_id = 'dm-sambhav'")
+    cursor.execute("UPDATE Messages SET channel_id = 'dm-aegisbot-rohith' WHERE channel_id = 'dm-aegisbot'")
+
     # Pre-seed initial messages if empty
     cursor.execute("SELECT COUNT(*) FROM Messages")
     if cursor.fetchone()[0] == 0:
@@ -829,10 +897,10 @@ def init_db():
             ("meeting-briefs", None, "AegisBot", "AI Intelligence Engine", "🛡️ [AIR-GAP VERIFIED] Zero PII leaks detected during closed-caption ingestion. All tokens sanitized before cloud reasoning.", "11:15 AM"),
             ("engineering", user_id_map.get("Mayank"), "Mayank Sachdeva", "Tech Lead", "Tested the end_meeting batch route with the 100 phonetic misspellings. It captured every variant perfectly.", "Yesterday 4:20 PM"),
             ("engineering", user_id_map.get("Sambhav"), "Sambhav Chordia", "Frontend Engineer", "Dynamic route /meetings/[id] now renders PM View, Group View, and Absentee View seamlessly.", "Yesterday 5:10 PM"),
-            ("dm-mayank", user_id_map.get("Mayank"), "Mayank Sachdeva", "Tech Lead", "Hey! Could you verify if the APScheduler job is properly registered in the lifespan context?", "11:02 AM"),
-            ("dm-mayank", user_id_map.get("Mayank"), "Mayank Sachdeva", "Tech Lead", "The zero-leak test passed with 100% assertions in test_phase4_end_meeting.py.", "11:05 AM"),
-            ("dm-sambhav", user_id_map.get("Sambhav"), "Sambhav Chordia", "Frontend Specialist", "The clickable meetings registry is working great. Users can jump straight to /meetings/[id].", "Yesterday"),
-            ("dm-aegisbot", None, "AegisBot", "Air-Gapped AI Assistant", "Hello! I am AegisBot. You can ask me about meeting intelligence, extracted deliverables, or trigger manual pipeline tests right here.", "09:00 AM"),
+            ("dm-mayank-rohith", user_id_map.get("Mayank"), "Mayank Sachdeva", "Tech Lead", "Hey! Could you verify if the APScheduler job is properly registered in the lifespan context?", "11:02 AM"),
+            ("dm-mayank-rohith", user_id_map.get("Mayank"), "Mayank Sachdeva", "Tech Lead", "The zero-leak test passed with 100% assertions in test_phase4_end_meeting.py.", "11:05 AM"),
+            ("dm-rohith-sambhav", user_id_map.get("Sambhav"), "Sambhav Chordia", "Frontend Specialist", "The clickable meetings registry is working great. Users can jump straight to /meetings/[id].", "Yesterday"),
+            ("dm-aegisbot-rohith", None, "AegisBot", "Air-Gapped AI Assistant", "Hello! I am AegisBot. You can ask me about meeting intelligence, extracted deliverables, or trigger manual pipeline tests right here.", "09:00 AM"),
         ]
         cursor.executemany(
             "INSERT INTO Messages (channel_id, sender_id, sender_name, sender_role, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1226,6 +1294,7 @@ def build_system_prompt(meeting_purpose: str = "AegisMeet Sync", share_technical
     - Injects meeting_purpose into analysis context
     - Enforces assigning 'unknown' to deadlines if no explicit date/time is mentioned
     - Omits deeply technical architecture details if share_technical_summary is False
+    - Demands comprehensive, exhaustive, multi-point structured summaries covering all meeting topics, decisions, risks, and next steps.
     """
     if share_technical_summary:
         tech_rule = (
@@ -1248,13 +1317,14 @@ CRITICAL DIRECTIVES:
 1. NEVER alter, translate, or invent bracketed tokens. Retain exact tokens such as [PERSON_1] as the assignee.
 2. DEADLINE ENFORCEMENT: Extract tasks and assign a specific date/time deadline. If not mentioned, assign the deadline strictly as 'unknown'. Do NOT guess, assume, or hallucinate deadlines.
 3. TECHNICAL DETAIL RULE: {tech_rule}
-4. Output STRICTLY a valid JSON object with no preamble, markdown code fences, or conversational text.
-5. You MUST use standard double quotes (") around ALL keys and string values. NEVER use single quotes (').
-6. Follow this EXACT JSON schema:
+4. EXPANSIVE MULTI-POINT SUMMARIES: Meeting summaries MUST be comprehensive, thorough, and detailed. Do NOT write single-sentence or abbreviated summaries. Cover every topic, decision, risk, dependency, and next step discussed.
+5. Output STRICTLY a valid JSON object with no preamble, markdown code fences, or conversational text.
+6. You MUST use standard double quotes (") around ALL keys and string values. NEVER use single quotes (').
+7. Follow this EXACT JSON schema:
 {{
-  "pm_view": "string (high-level blockers, risks, and resource dependencies contextualized to {meeting_purpose})",
-  "group_view": "string (core decisions, deliverables, and team milestones)",
-  "absent_view": "string (concise catch-up summary for members who missed the call)",
+  "pm_view": "string (Comprehensive, multi-paragraph and bulleted analysis covering: 1) Executive blockers & operational dependencies, 2) Technical architecture risks and infrastructure constraints, 3) Timeline and delivery milestones, 4) Resource bottlenecks and risk mitigation actions, all deeply contextualized to {meeting_purpose})",
+  "group_view": "string (Exhaustive, in-depth multi-point summary covering: 1) Core discussion topics debated, 2) Architecture decisions and technical consensus reached, 3) Tradeoffs evaluated, 4) Agreed deliverables, owner accountability, and project milestones for {meeting_purpose})",
+  "absent_view": "string (Detailed, comprehensive catch-up dossier for team members who missed the call, covering: 1) Meeting context and background rationale, 2) Complete breakdown of all discussion items and debate points, 3) Concrete decisions and architecture changes approved, 4) Assigned deliverables, expectations, and upcoming sprint schedule)",
   "tasks": [
     {{
       "assignee": "[PERSON_X]",
@@ -1369,7 +1439,7 @@ async def query_featherless_ai(
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.2,
-        "max_tokens": 1500,
+        "max_tokens": 3500,
     }
 
     candidate_models = [FEATHERLESS_MODEL]
@@ -1415,6 +1485,7 @@ def mock_offline_reasoning(
     - Contextualizes views with meeting_purpose
     - If task has no explicitly mentioned date/time, sets deadline to 'unknown'
     - If share_technical_summary is False, omits deeply technical architecture details
+    - Produces expansive, multi-point structured summaries covering all meeting topics, decisions, risks, and next steps.
     """
     tokens = re.findall(r"\[[A-Z]+_\d+\]", sanitized_transcript)
     primary_person = tokens[0] if tokens else "[PERSON_1]"
@@ -1430,15 +1501,57 @@ def mock_offline_reasoning(
     deadline_2 = all_dates[1].strip() if len(all_dates) > 1 else "unknown"
 
     if share_technical_summary:
-        pm_view = f"Meeting Purpose: {meeting_purpose}. Technical review highlighted architecture dependencies led by {primary_person}. Cloud schema and zero-leak boundary aligned."
-        group_view = f"Decided to proceed with zero-leak proxy implementation for {meeting_purpose}. {secondary_person} leading core tasks."
-        absent_view = f"The team reviewed system architecture for {meeting_purpose}. {primary_person} identified API constraints; deliverables delegated to {secondary_person}."
+        pm_view = (
+            f"### Executive & Technical Risk Assessment — {meeting_purpose}\n\n"
+            f"1. **Technical review and architectural risk assessment**: {primary_person} identified critical path requirements across the zero-leak tokenization engine and SQLite WAL database layer. Ensuring end-to-end data integrity during high concurrent intake is paramount.\n\n"
+            f"2. **Operational Constraints & Latency Bounds**: Reverse proxy routing and client-side polling must adhere to a strict latency ceiling (< 150ms). {secondary_person} highlighted potential throughput bottlenecks during concurrent multi-channel messaging.\n\n"
+            f"3. **Cross-Service Resource Allocation**: Development velocity depends on synchronization between frontend state machines and backend FastAPI services. Staged deployment verified across all 6 team environments.\n\n"
+            f"4. **Mitigation & Fallback Governance**: Ephemeral RAM wiping verified to execute immediately following batch analysis. Automated failover to deterministic local reasoning guarantees zero downtime even if upstream APIs experience degraded performance."
+        )
+        group_view = (
+            f"### Comprehensive Group Decisions & Strategic Deliverables — {meeting_purpose}\n\n"
+            f"• **Air-Gapped Zero-Leak Standard Ratified**: Unanimous consensus to enforce pre-LLM PII scrubbing across all meeting audio and closed captions. Raw participant identities will never leave local memory unmasked.\n\n"
+            f"• **Phonetic ASR Normalization & Alias Expansion**: Deployed comprehensive 100+ phonetic variant dictionaries per participant to capture speech recognition misspellings before Presidio deny-list filtering.\n\n"
+            f"• **Direct Messaging Architecture & Channel Isolation**: Approved symmetric channel pair mapping (dm-user1-user2) alongside private, isolated AI assistant channels (dm-aegisbot-user) to prevent cross-profile message leakage.\n\n"
+            f"• **Action Item Extraction & Deadline Compliance**: Implemented strict anti-hallucination validation rules: any extracted action item lacking an explicit spoken date/time is permanently tagged as 'unknown' rather than hallucinated."
+        )
+        absent_view = (
+            f"### Absentee Comprehensive Catch-Up Dossier — {meeting_purpose}\n\n"
+            f"**Meeting Overview & Context**:\n"
+            f"The core engineering team convened for {meeting_purpose} to finalize system architecture, review security boundaries, and align on upcoming sprint milestones.\n\n"
+            f"**Key Discussion Topics Covered**:\n"
+            f"- **Security & Compliance**: {primary_person} presented validation test reports confirming 100% PII redaction across simulated meeting sessions.\n"
+            f"- **Frontend & Communication Channels**: {secondary_person} demonstrated real-time multi-user communication, unread badge synchronization, and isolated direct messaging.\n"
+            f"- **Milestone Status**: Core tasks are on schedule for the upcoming release, with high test coverage maintained across all critical execution paths.\n\n"
+            f"**Immediate Actionable Next Steps**:\n"
+            f"- {secondary_person} will finalize dashboard integration and QA test signoff.\n"
+            f"- {primary_person} will complete security audit documentation and verify cross-origin tunnel configurations."
+        )
         task1_title = "Complete frontend dashboard and proxy integration"
         task2_title = "Review security audit logs and verify zero-leak compliance"
     else:
-        pm_view = f"Meeting Purpose: {meeting_purpose}. Executive overview: Operational alignment achieved. Delivery schedules confirmed with {primary_person}."
-        group_view = f"High-level strategy confirmed for {meeting_purpose}. Deliverables assigned to team leads."
-        absent_view = f"Brief executive sync regarding {meeting_purpose}. General progress reviewed and deliverables delegated to {secondary_person}."
+        pm_view = (
+            f"### Executive overview & Strategic Alignment — {meeting_purpose}\n\n"
+            f"1. **Delivery Schedule Alignment**: Operational alignment achieved across all functional teams. Primary milestones confirmed with {primary_person}.\n\n"
+            f"2. **Stakeholder Dependencies**: Cross-departmental coordination established with leadership to ensure frictionless rollout and change management.\n\n"
+            f"3. **Resource & Budget Tracking**: Project resource allocation reviewed; all workstreams remain within targeted quarterly velocity projections.\n\n"
+            f"4. **Risk Management**: Continuous monitoring enabled to identify timeline drift early and maintain team delivery commitments."
+        )
+        group_view = (
+            f"### Executive Summary & Team Alignments — {meeting_purpose}\n\n"
+            f"• **Strategic Vision & Roadmap**: Confirmed core project objectives and strategic direction for {meeting_purpose}.\n\n"
+            f"• **Key Milestone Approvals**: High-level deliverables approved for immediate execution with clear ownership delegated to team leads.\n\n"
+            f"• **Cross-Team Collaboration**: Established weekly synchronization cadence and unified reporting standards across all involved stakeholders."
+        )
+        absent_view = (
+            f"### Executive Briefing for Absent Members — {meeting_purpose}\n\n"
+            f"**Executive Context**:\n"
+            f"Brief strategic synchronization convened regarding {meeting_purpose}. Leadership and team leads reviewed overall project health and organizational milestones.\n\n"
+            f"**Summary of Discussion**:\n"
+            f"- High-level operational progress reviewed and approved.\n"
+            f"- Deliverables and responsibilities delegated to {secondary_person} and {primary_person}.\n"
+            f"- Next milestone review scheduled for the upcoming operating cycle."
+        )
         task1_title = "Coordinate team deliverables and project updates"
         task2_title = "Prepare executive briefing and status report"
 
@@ -3169,22 +3282,43 @@ def get_messages_endpoint(
 ):
     """
     Returns messages, optionally filtered by channel_id.
-    Supports symmetric DM channels (e.g. dm-mayank-rohith <-> dm-rohith-mayank, dm-mayank, dm-rohith).
-    Enables real-time cross-client message synchronization.
+    Supports strictly isolated symmetric DM channels (e.g. dm-mayank-rohith <-> dm-rohith-mayank)
+    and user-scoped AegisBot assistant channels (e.g. dm-aegisbot-rohith, dm-aegisbot-mayank).
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     if channel_id:
+        if channel_id == "dm-aegisbot" or channel_id.startswith("dm-aegisbot"):
+            cursor.execute("""
+                SELECT id, channel_id, sender_id, sender_name, sender_role, text, created_at
+                FROM Messages
+                WHERE channel_id = ?
+                ORDER BY id ASC
+            """, (channel_id,))
+            rows = cursor.fetchall()
+            if not rows:
+                conn.close()
+                return [{
+                    "id": -1,
+                    "channel_id": channel_id,
+                    "sender_id": None,
+                    "sender_name": "AegisBot",
+                    "sender_role": "Air-Gapped AI Assistant",
+                    "text": "Hello! I am AegisBot. You can ask me about meeting intelligence, extracted deliverables, or trigger manual pipeline tests right here.",
+                    "created_at": "Just now",
+                }]
+            conn.close()
+            return [dict(r) for r in rows]
+
         if channel_id.startswith("dm-"):
             parts = channel_id[3:].split("-")
             if len(parts) == 2:
                 u1, u2 = parts[0].lower(), parts[1].lower()
+                # Strictly isolate this two-party DM pair
                 match_channels = [
                     f"dm-{u1}-{u2}",
                     f"dm-{u2}-{u1}",
-                    f"dm-{u1}",
-                    f"dm-{u2}",
                 ]
                 placeholders = ",".join("?" for _ in match_channels)
                 cursor.execute(f"""
@@ -3250,7 +3384,7 @@ def create_message_endpoint(
 
     # If it's the AI assistant channel or briefs, trigger an AegisBot reply
     bot_reply_dict = None
-    if payload.channel_id in ("dm-aegisbot", "meeting-briefs"):
+    if payload.channel_id in ("dm-aegisbot", "meeting-briefs") or payload.channel_id.startswith("dm-aegisbot"):
         bot_text = "🛡️ [Zero-Leak Acknowledged] Message received and indexed in tasks.db. Zero PII leaks detected."
         bot_time = datetime.now().strftime("%I:%M %p")
         cursor.execute("""
@@ -3290,15 +3424,13 @@ def clear_messages_endpoint(channel_id: Optional[str] = None):
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     cursor = conn.cursor()
     if channel_id:
-        if channel_id.startswith("dm-"):
+        if channel_id.startswith("dm-") and not (channel_id == "dm-aegisbot" or channel_id.startswith("dm-aegisbot")):
             parts = channel_id[3:].split("-")
             if len(parts) == 2:
                 u1, u2 = parts[0].lower(), parts[1].lower()
                 match_channels = [
                     f"dm-{u1}-{u2}",
                     f"dm-{u2}-{u1}",
-                    f"dm-{u1}",
-                    f"dm-{u2}",
                 ]
                 placeholders = ",".join("?" for _ in match_channels)
                 cursor.execute(f"DELETE FROM Messages WHERE channel_id IN ({placeholders})", match_channels)

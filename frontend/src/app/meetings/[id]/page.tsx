@@ -244,41 +244,41 @@ export default function MeetingDetailPage({ params }: MeetingDetailProps) {
                 {/* Tab Content Display */}
                 <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-5 text-xs text-zinc-300 leading-relaxed min-h-[120px]">
                   {activeViewTab === "group" && (
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       <div className="flex items-center gap-2 text-zinc-400 font-semibold text-[11px] uppercase tracking-wider">
                         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                         <span>Core Decisions & Team Deliverables</span>
                       </div>
-                      <p className="text-white text-sm">
+                      <div className="text-zinc-100 text-sm whitespace-pre-wrap leading-relaxed font-normal">
                         {meeting.group_view ||
                           "No group view generated yet. If the meeting has ended, trigger 'End Meeting & Batch Process' above."}
-                      </p>
+                      </div>
                     </div>
                   )}
 
                   {activeViewTab === "pm" && (
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       <div className="flex items-center gap-2 text-amber-400 font-semibold text-[11px] uppercase tracking-wider">
                         <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
                         <span>PM Risks, Blockers & Resource Dependencies</span>
                       </div>
-                      <p className="text-white text-sm">
+                      <div className="text-zinc-100 text-sm whitespace-pre-wrap leading-relaxed font-normal">
                         {meeting.pm_view ||
                           "No PM view generated yet. End-of-meeting batch analysis will extract operational risks and dependencies."}
-                      </p>
+                      </div>
                     </div>
                   )}
 
                   {activeViewTab === "absent" && (
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       <div className="flex items-center gap-2 text-zinc-400 font-semibold text-[11px] uppercase tracking-wider">
                         <Users className="w-3.5 h-3.5 text-blue-400" />
                         <span>Absentee Catch-Up Summary</span>
                       </div>
-                      <p className="text-white text-sm">
+                      <div className="text-zinc-100 text-sm whitespace-pre-wrap leading-relaxed font-normal">
                         {meeting.absent_view ||
                           "No absentee summary available. Once generated, team members who missed the call will see key takeaways here."}
-                      </p>
+                      </div>
                     </div>
                   )}
                 </div>
