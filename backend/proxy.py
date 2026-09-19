@@ -1833,11 +1833,14 @@ async def _execute_bot_session(meet_url: str, bot_name: str = "AegisMeet Notetak
 # ==============================================================================
 # API Endpoints
 # ==============================================================================
+@app.get("/")
 @app.get("/health")
 def health_check():
     return {
         "status": "healthy",
         "service": "AegisMeet Privacy Proxy",
+        "version": "1.0.0",
+        "docs": "/docs",
         "presidio_model": "en_core_web_lg",
         "featherless_model": FEATHERLESS_MODEL,
         "scheduler_running": scheduler.running,

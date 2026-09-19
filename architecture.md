@@ -178,23 +178,27 @@ Automated Speech Recognition (ASR) systems frequently mishear multicultural name
 
 ## 6. Next.js Multi-Page Frontend & Enterprise UI
 
-1. **JWT Authentication & Middleware Protection ([`frontend/src/lib/api.ts`](frontend/src/lib/api.ts))**:
-   - Axios request interceptor attaches `Authorization: Bearer ${token}`.
-   - 401 response interceptor redirects unauthenticated users to `/login`.
+1. **Strict Credential-Based JWT Authentication ([`frontend/src/lib/api.ts`](frontend/src/lib/api.ts))**:
+   - Access to workspaces is strictly gated by valid username/password credentials.
+   - Axios request interceptor automatically attaches `Authorization: Bearer ${token}` from `localStorage`.
+   - 401 response interceptor purges expired sessions and redirects unauthenticated users to `/login`.
 2. **Clickable Meetings Registry & Dynamic Routing**:
    - **`/meetings`**: Renders dark-themed "Meetings History & Registry" table strictly with columns: `"Purpose"`, `"Scheduled Time"`, `"Privacy Status"`.
    - **Clickable Purpose Link**: Clicking a meeting's purpose navigates to `/meetings/[id]`.
    - **`/meetings/[id]` Dynamic Hub**:
      - Fetches `/api/meetings/${id}`.
      - Displays session status (`Completed` / `Scheduled`), scheduled time, and air-gap badge.
-     - 3 Tabbed / Card views: **PM View** (blockers, risks, dependencies), **Group View** (core decisions, deliverables), and **Absentee View** (catch-up summary).
+     - 3 Expansive Card views: **PM View** (blockers, architecture risks, dependencies), **Group View** (core decisions, consensus points, deliverables), and **Absentee View** (comprehensive catch-up summary).
      - Action Items Table with Assignee, Deadline (`unknown` badge), and interactive status checkbox (`pending` $\leftrightarrow$ `completed`).
      - "End Meeting & Batch Process" action button for on-demand intelligence extraction.
-3. **Interactive Communications & Telemetry Modules**:
-   - **`/messages`**: Multi-channel enterprise messaging hub with channels (`#general`, `#meeting-briefs`, `#engineering-zero-leak`), direct messages (`Mayank`, `Sambhav`, `Admin`, `AegisBot`), live message input with Send/Enter triggers, AegisBot auto-replies, and local state persistence.
+3. **Strict Two-Party DM Isolation & Private AegisBot (`/messages`)**:
+   - **Deterministic Symmetric Channel IDs**: Two-party direct messages compute a sorted key (`dm-user1-user2` where `user1 < user2` alphabetically). Regardless of who initiates the thread, both users connect to the exact same channel without crosstalk.
+   - **Private User-Scoped AegisBot Streams**: AegisBot interactions are isolated per user (`dm-aegisbot-${userSlug}`), ensuring one user cannot inspect another user's bot audit trail or verification receipts.
+   - **Cross-Client Live Sync**: Background polling every 3 seconds syncs incoming chats in real-time across multiple browsers without manual page reloads.
+4. **Notifications & High-Contrast Design System**:
    - **`/notifications`**: Filterable alert center with category tabs (`All`, `Action Items`, `Security & Privacy`, `Scheduler & Bot`), unread counters, individual dismiss buttons, and "Mark all as read".
    - **`/dashboard`**: High-contrast grayscale dashboard with clickable metric cards routing to `/tasks`, `/projects`, and `/messages`, SVG Activity Overview graph, and Recent Tasks table with direct status toggle.
-   - **Sidebar Badges**: Unread indicators (`34` on Messages, `2` on Notifications) matching reference design.
+   - **Sidebar Badges**: Dynamic unread indicators matching real-time database state.
 
 ---
 
@@ -202,43 +206,53 @@ Automated Speech Recognition (ASR) systems frequently mishear multicultural name
 
 | Method | Endpoint | Auth Required | Description |
 | :--- | :--- | :--- | :--- |
+| `GET`  | `/` | None | Root health check, version info, and Swagger documentation links |
+| `GET`  | `/health` | None | Detailed server health, model status, and RAM token count |
 | `POST` | `/api/login` | None | Authenticates canonical name & password; returns JWT Bearer token |
-| `GET` | `/api/me` | Bearer Token | Returns authenticated user profile and permissions |
+| `GET`  | `/api/me` | Bearer Token | Returns authenticated user profile and permissions |
 | `POST` | `/api/users` | Admin Only | Registers new user and populates 100 phonetic aliases |
-| `GET` | `/api/users` | Admin Only | Lists registered enterprise users |
-| `GET` | `/api/tasks` | Bearer Token | Returns tasks (strictly filtered by `assignee_id` for regular users) |
+| `GET`  | `/api/users` | Admin Only | Lists registered enterprise users |
+| `GET`  | `/api/tasks` | Bearer Token | Returns tasks (strictly filtered by `assignee_id` for regular users) |
 | `POST` | `/api/tasks` | Bearer Token | Creates new task assigned to user or project |
 | `PATCH`| `/api/tasks/{id}`| Bearer Token | Updates task completion status (`completed` / `pending`) |
 | `DELETE`|`/api/tasks/{id}`| Bearer Token | Deletes task record |
-| `GET` | `/api/projects` | Bearer Token | Lists enterprise projects |
+| `GET`  | `/api/projects` | Bearer Token | Lists enterprise projects |
 | `POST` | `/api/projects` | Bearer Token | Registers new project |
-| `GET` | `/api/meetings` | Bearer Token | Lists meetings (strictly filtered by user involvement) |
-| `GET` | `/api/meetings/{id}`| Bearer Token | Returns full meeting details, `pm_view`, `group_view`, `absent_view`, and tasks |
+| `GET`  | `/api/meetings` | Bearer Token | Lists meetings (strictly filtered by user involvement) |
+| `GET`  | `/api/meetings/{id}`| Bearer Token | Returns full meeting details, `pm_view`, `group_view`, `absent_view`, and tasks |
 | `POST` | `/end_meeting` | Optional | Triggers end-of-meeting batch processing and RAM flush |
 | `POST` | `/api/end_meeting` | Optional | Alias endpoint for batch processing |
 | `POST` | `/meetings/{id}/end`| Optional | Alias route targeting specific meeting ID |
 | `POST` | `/join` | Bearer Token | Triggers immediate Playwright bot join to Google Meet |
 | `POST` | `/schedule` | Bearer Token | Schedules future meeting bot execution via APScheduler |
-| `GET` | `/api/bot/status` | Optional | Queries active bot state, duration, and captions captured |
+| `GET`  | `/api/bot/status` | Optional | Queries active bot state, duration, and captions captured |
 | `POST` | `/api/bot/leave` | Optional | Disconnects and terminates active meeting bot session |
 | `POST` | `/api/normalize` | Optional | Rewrites speech recognition aliases in raw transcript |
 | `POST` | `/api/mask` | Optional | Returns Presidio PII tokenization preview |
 | `POST` | `/api/process` | Optional | End-to-end transcript intake, masking, reasoning & rehydration |
-| `GET` | `/api/latest-result`| Optional | Fetches most recent meeting summary and extracted items |
-| `GET` | `/api/aliases` | Bearer Token | Returns registered phonetic aliases |
+| `GET`  | `/api/latest-result`| Optional | Fetches most recent meeting summary and extracted items |
+| `GET`  | `/api/messages` | Bearer Token | Fetches messages with symmetric two-party channel isolation |
+| `POST` | `/api/messages` | Bearer Token | Sends message to channel or direct message thread |
+| `POST` | `/api/messages/clear`| Bearer Token | Clears chat message history |
+| `GET`  | `/api/aliases` | Bearer Token | Returns registered phonetic aliases |
 | `POST` | `/api/aliases/generate` | Bearer Token | On-demand generation of 100 phonetic variants for any name |
-| `GET` | `/api/audit-logs` | Optional | Verifies zero-leak outbound network telemetry |
-| `GET` | `/aegis-meet.js` | None | Serves in-tab browser caption scraper bookmarklet |
+| `GET`  | `/api/audit-logs` | Optional | Verifies zero-leak outbound network telemetry |
+| `GET`  | `/aegis-meet.js` | None | Serves in-tab browser caption scraper bookmarklet |
 
 ---
 
 ## 8. Verification & Quality Assurance Suite
 
-The system includes comprehensive automated regression suites executed with `pytest`:
+The system is validated by **50 automated tests across 9 comprehensive test suites** executed via `pytest`:
 1. `backend/test_phase1_auth.py` (9 tests): Relational tables, JWT issuance, admin restrictions, and strict user privacy filtering.
 2. `backend/test_phase2_aliases.py` (6 tests): Featherless AI integration, 100-alias combinatorial fallback, auto-population, and privacy.
 3. `backend/test_phase3_scheduler.py` (8 tests): Playwright stealth flags, caption selectors, mutation observers, APScheduler lifespan, and buffer accumulation.
 4. `backend/test_phase4_masking_prompts.py` (7 tests): ASR alias normalization, Presidio deny-list, meeting config propagation, and strict `"unknown"` deadlines.
 5. `backend/test_phase4_end_meeting.py` (3 tests): End-of-meeting trigger, batch LLM reasoning, SQLite persistence of 3 views, RAM wipes, and zero transcript retention.
-- **Regression Result:** **33/33 tests passing (100% success rate)**.
+6. `backend/test_pipeline.py` (5 tests): End-to-end transcript intake, normalization, PII masking, LLM parsing, and local rehydration.
+7. `backend/test_bot_integration.py` (4 tests): Playwright mock meet DOM interactions, live caption ingestion, and automated browser lifecycle.
+8. `backend/test_stress_full_system.py` (4 tests): High-volume transcript chunking, concurrent multi-user load, database integrity under stress, and resilience.
+9. `backend/test_messaging_isolation_and_summaries.py` (4 tests): Symmetric 2-party DM channel isolation, cross-profile privacy, private AegisBot scoping, and comprehensive meeting view length checks.
+
+- **Regression Result:** **50/50 tests passing (100% success rate)**.
 - **Frontend Build:** `npm run build` compiles **12/12 routes with 0 errors** (`/meetings/[id]` server-rendered on demand).

@@ -54,11 +54,11 @@ Most AI meeting notetakers send raw transcripts directly to third-party cloud AP
 - Captions accumulate in a fast in-memory session buffer (`MEETING_TRANSCRIPT_BUFFERS[meeting_id]`).
 - When the meeting concludes, an atomic trigger (`POST /end_meeting`) executes the full batch pipeline at once.
 
-### 4. 👥 3 Persona-Based Intelligence Views
-Each completed meeting generates three tailored perspectives:
-- **PM View**: Identifies key blockers, technical risks, project dependencies, and delivery timelines.
-- **Group View**: Captures high-level team decisions, consensus points, and overarching project milestones.
-- **Absentee View**: Provides a concise 5-minute catch-up summary for team members who could not attend.
+### 4. 👥 3 Persona-Based Comprehensive Intelligence Views
+Each completed meeting generates three expansive, structured perspectives:
+- **PM View**: Comprehensive analysis covering executive blockers, technical architecture risks, infrastructure dependencies, and mitigation strategies.
+- **Group View**: Exhaustive multi-point breakdown of core discussion topics, architectural decisions, tradeoffs evaluated, and team milestone commitments.
+- **Absentee View**: Thorough catch-up dossier detailing background context, key discussion points, and immediate next steps for team members who missed the call.
 
 ### 5. 📋 Relational Action Item Delegation
 - Automatically extracts deliverables with strict anti-hallucination rules:
@@ -66,19 +66,22 @@ Each completed meeting generates three tailored perspectives:
   - If technical summary sharing is disabled, deep architectural minutiae is withheld from general views.
 - Tasks are saved with relational foreign keys (`meeting_id`, `assignee_id`) with strict per-user privacy filtering.
 
-### 6. 💬 Real-Time Multi-User Messaging & AegisBot
-- Multi-channel team communication (`#general`, `#meeting-briefs`, `#engineering-zero-leak`, and 1-on-1 direct messages).
-- Backed by the centralized SQLite database and synchronized across all deployed devices via a 3-second live polling loop.
-- Integrated **AegisBot** delivers automated air-gap verification receipts and meeting summaries.
+### 6. 💬 Isolated Multi-User Messaging & Private AegisBot
+- **Strict Two-Party DM Isolation**: Direct messages use deterministic symmetric channel IDs (`dm-user1-user2`) to eliminate cross-profile crosstalk.
+- **Private User-Scoped AegisBot**: Each attendee possesses an isolated AI assistant stream (`dm-aegisbot-${userSlug}`) with initial greeting receipts.
+- **Real-Time Cross-Client Sync**: Backed by SQLite and synchronized across all connected users via a 3-second live polling loop with unread badges.
 
-### 7. 🤖 Playwright Headless Meeting Bot & Lifespan Scheduler
+### 7. 🤖 Playwright Stealth Meeting Bot & Intelligent Exit
 - Joins Google Meet calls with Chromium bypass flags (`--use-fake-ui-for-media-stream`, `--disable-blink-features=AutomationControlled`).
 - Monitors Google Meet closed captions via a JavaScript `MutationObserver` on `aria-live` elements.
+- **Automatic Call Exit**: Listens for verbal conclusion triggers (*"ending the meeting"*, *"wrap up the meeting"*, *"conclude the meeting"*) to automatically exit Google Meet lobbies and terminate browser processes.
 - Integrated `AsyncIOScheduler` manages scheduled meetings within the FastAPI application lifecycle.
 
-### 8. 🖥️ High-Contrast Enterprise Grayscale UI
+### 8. 🖥️ High-Contrast Enterprise Grayscale UI & Secure Authentication
 - Built with **Next.js 16 App Router** in a distraction-free monochrome aesthetic.
-- Interactive dashboard metric cards, clickable meeting history registry leading to dynamic routes (`/meetings/[id]`), interactive task status toggles (`pending` ↔ `completed`), and notification alert center.
+- **Secure Credential-Protected Access**: Hardened login portal requiring valid credentials for team personas (**Admin**, **Rohith**, **Mayank**, **Sambhav**, **Sanjeet**, **Pranav**) with automatic session expiration.
+- **Personalized Work Profiles**: Dedicated work scopes, departmental affiliations, and GitHub repositories on `/settings`.
+- Interactive dashboard metric cards, clickable meeting registry leading to dynamic routes (`/meetings/[id]`), interactive task status toggles (`pending` ↔ `completed`), and alert center.
 
 ---
 
@@ -245,31 +248,36 @@ erDiagram
 Pragyan/
 ├── backend/
 │   ├── proxy.py              # Core FastAPI privacy proxy, Presidio engine, and REST routes
-│   ├── bot.py                # Playwright headless Google Meet scraper bot
+│   ├── bot.py                # Playwright headless Google Meet scraper bot with auto-exit
 │   ├── tasks.db              # SQLite relational database (Users, Tasks, Meetings, Messages)
 │   ├── requirements.txt      # Python dependencies (FastAPI, Presidio, spaCy, Playwright)
-│   ├── test_phase1_auth.py   # JWT & Relational schema unit tests
-│   ├── test_phase2_aliases.py# 100 phonetic aliases generation tests
-│   ├── test_phase3_scheduler.py # APScheduler & Playwright flag tests
-│   ├── test_phase4_end_meeting.py # Batch trigger & RAM scrubber tests
-│   └── test_phase4_masking_prompts.py # Presidio PII & prompt anti-hallucination tests
+│   ├── test_phase1_auth.py   # JWT & Relational schema unit tests (9 tests)
+│   ├── test_phase2_aliases.py# 100 phonetic aliases generation tests (6 tests)
+│   ├── test_phase3_scheduler.py # APScheduler & Playwright flag tests (8 tests)
+│   ├── test_phase4_end_meeting.py # Batch trigger & RAM scrubber tests (3 tests)
+│   ├── test_phase4_masking_prompts.py # Presidio PII & prompt anti-hallucination tests (7 tests)
+│   ├── test_pipeline.py      # End-to-end transcript intake & rehydration tests (5 tests)
+│   ├── test_bot_integration.py # Mock meet DOM observer & bot scraping tests (4 tests)
+│   ├── test_stress_full_system.py # High-concurrency & resilience stress tests (4 tests)
+│   └── test_messaging_isolation_and_summaries.py # 2-party DM isolation & summary tests (4 tests)
 ├── frontend/
 │   ├── src/
 │   │   ├── app/
 │   │   │   ├── dashboard/    # Main workspace dashboard & activity metrics
 │   │   │   ├── meetings/     # Meetings registry and /meetings/[id] dynamic detail view
-│   │   │   ├── messages/     # Real-time multi-channel and DM messaging hub
+│   │   │   ├── messages/     # Real-time multi-channel and isolated DM messaging hub
 │   │   │   ├── notifications/# Filterable security and task alert center
 │   │   │   ├── tasks/        # Personal and team action items table
 │   │   │   ├── projects/     # Company projects overview
 │   │   │   ├── settings/     # User profile, company productivity & credentials
-│   │   │   └── login/        # JWT authentication login portal
+│   │   │   └── login/        # JWT credential-authenticated login portal
 │   │   ├── components/       # Header, Sidebar, and reusable UI components
 │   │   └── lib/
 │   │       └── api.ts        # Axios client, auth token interceptors, and API bindings
 │   ├── package.json          # Next.js 16 and React dependencies
 │   └── tailwind.config.ts    # Grayscale styling rules
 ├── architecture.md           # Master technical system blueprint
+├── overdrive.md              # Hackathon submission brief & team roster
 └── README.md                 # Project documentation
 ```
 
@@ -337,28 +345,53 @@ Open **`http://localhost:3000`** in your browser.
 
 ---
 
-### 3. Running Automated Test Suites
+### 3. Hybrid Deployment (Option 2: Cloudflare Tunnel + Vercel)
 
-AegisMeet includes 33 end-to-end unit tests validating authentication, alias generation, meeting scheduling, batch masking, and RAM wiping:
+To run the privacy backend locally on your machine while hosting the Next.js frontend on Vercel:
+
+1. **Start the local privacy backend:**
+   ```bash
+   cd backend
+   uvicorn proxy:app --host 127.0.0.1 --port 8000 --reload
+   ```
+2. **Expose port 8000 via Cloudflare Tunnel:**
+   ```bash
+   npx cloudflared tunnel --url http://localhost:8000
+   ```
+   *Note the generated public URL: `https://<subdomain>.trycloudflare.com`*
+3. **Configure Vercel Environment Variables:**
+   - In your Vercel project settings, set:
+     ```text
+     NEXT_PUBLIC_PROXY_URL = https://<subdomain>.trycloudflare.com
+     ```
+   - Trigger a redeployment. The cloud frontend will securely communicate with your local privacy proxy.
+
+---
+
+### 4. Running Automated Test Suites
+
+AegisMeet includes **50 comprehensive automated tests across 9 test suites** validating authentication, phonetic aliases, meeting scheduling, stealth bot joining, verbal auto-exit, Presidio PII neutralization, zero-leak reasoning, DM channel isolation, and RAM wiping:
 
 ```bash
 cd backend
 source venv/bin/activate
-pytest test_phase*.py -v
+pytest test_*.py -v
 ```
 
 ---
 
 ## 🔐 Default Team Credentials
 
-For testing and local demonstration, the database comes pre-seeded with the following accounts:
+For testing and demonstration, the database comes pre-seeded with the following accounts:
 
-| Username | Password | Role | Description |
+| Username | Password | Role | Department / Description |
 | :--- | :--- | :--- | :--- |
-| **`Admin`** | `admin123` | Administrator | Full access to all team tasks, users, and telemetry |
-| **`Rohith`** | `rohith123` | Team Member | Restricted view; only sees own tasks and meetings |
-| **`Mayank`** | `mayank123` | Team Member | Restricted view; Tech Lead profile |
-| **`Sambhav`** | `sambhav123` | Team Member | Restricted view; Frontend Engineer profile |
+| **`Admin`** | `admin123` | Administrator | System Administration & Full Telemetry |
+| **`Rohith`** | `rohith123` | Team Member | Engineering Lead (Restricted personal view) |
+| **`Mayank`** | `mayank123` | Team Member | Tech Lead & Core Architecture |
+| **`Sambhav`** | `sambhav123` | Team Member | Frontend Specialist & UI Design |
+| **`Sanjeet`** | `sanjeet123` | Team Member | Security Engineer & Air-Gap Auditor |
+| **`Pranav`** | `pranav123` | Team Member | Cloud Systems & Infrastructure |
 
 ---
 

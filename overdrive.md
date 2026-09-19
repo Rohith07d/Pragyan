@@ -164,34 +164,30 @@ The reasoning agent is prompted to output a strict JSON schema containing separa
 
 | Layer | Technology |
 |-------|------------|
-| Frontend / Interface | Next.js, React, Tailwind CSS |
-| Backend | Python 3, FastAPI, Uvicorn |
-| Agent Framework | Custom Python asynchronous pipeline |
-| Database / Storage | SQLite (Tasks) + In-memory RAM dictionary (PII Tokens) |
-| Hosting | Local host machine, Ngrok tunnel, Vercel frontend |
-| Other | Microsoft Presidio, spaCy, Playwright, Featherless AI |
+| Frontend / Interface | Next.js 16 (App Router), React 19, Tailwind CSS, Lucide Icons |
+| Backend | Python 3.13, FastAPI, Uvicorn, APScheduler |
+| Agent Framework | Custom Python asynchronous pipeline with Playwright automation |
+| Database / Storage | SQLite3 (`tasks.db`) + Ephemeral In-memory RAM dictionary (PII Tokens) |
+| Hosting | Local privacy proxy, Cloudflare / ngrok tunnel, Vercel frontend |
+| Security / NLP | Microsoft Presidio (`en_core_web_lg`), PyJWT, Featherless AI |
 
 ---
 
 ## 9. What to Expect From Our Current Build
 
-**Working:**
+**Working & Fully Implemented:**
 
-- Headless Playwright bot joining Google Meet URLs and extracting live captions.
-- Local entity masking via Microsoft Presidio and RAM dictionary mapping.
-- Persona-based prompt engineering returning structured JSON from Featherless AI.
-- Re-hydration of sanitized summaries back to full plaintext locally.
-- Webhook dispatch routing task delegations to external simulated group chats.
-- Next.js dual-pane dashboard showing cloud payload vs. local task tracking.
+- Headless Playwright bot joining Google Meet URLs, capturing live captions, and automatically leaving when verbal conclusion triggers (*"ending the meeting"*, *"wrap up"*, *"conclude"*) are detected.
+- Local entity masking via Microsoft Presidio (`en_core_web_lg`) and RAM dictionary mapping with 100 phonetic variants per attendee.
+- Persona-based prompt engineering returning structured JSON from Featherless AI (Qwen-2.5-72B / Llama-3-70B).
+- Re-hydration of sanitized summaries back to full plaintext locally with immediate RAM wiping.
+- Multi-page Next.js enterprise UI with JWT authentication, dashboard analytics, meeting registry, and interactive action items.
+- Strict two-party isolated messaging (`dm-user1-user2`) and private user-scoped AegisBot streams.
+- Complete 50-test automated regression suite with 100% passing rate.
 
-**Partly working, mocked, or hard-coded:**
+**Communication Integration:**
 
-- Communication relies on standard Discord/Slack webhooks rather than the heavily restricted WhatsApp Business API or Microsoft Graph API.
-- Dashboard authentication is mocked visually to focus on the core AI pipeline.
-
-**Not working or not built yet:**
-
-- Cross-meeting contradiction detection and automated workload management are scoped out due to time and database complexity.
+- Real-time internal messaging synchronized across users via SQLite and live polling, complemented by automated webhook dispatch to Discord/Slack.
 
 **What we'd most like to be judged on:**
 

@@ -1,36 +1,97 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AegisMeet: Enterprise Frontend Application
 
-## Getting Started
+> **Zero-Leak Privacy Meeting Intelligence & Enterprise Task Governance**  
+> Built with **Next.js 16 (App Router)**, **React 19**, **Turbopack**, and **Tailwind CSS**.
 
-First, run the development server:
+---
+
+## 🌟 Overview
+
+The AegisMeet frontend provides a distraction-free, high-contrast grayscale interface designed for enterprise teams. It interacts with the local FastAPI privacy proxy engine to display anonymized meeting intelligence, delegated task tracking, and multi-user communications without ever receiving unredacted PII or audio transcripts.
+
+---
+
+## 🔑 Key Features
+
+- **Strict Credential-Based Authentication (`/login`)**: Protected login with salted hash verification. Users must enter valid credentials to access their personalized workspace.
+- **Symmetric Two-Party Messaging (`/messages`)**: Real-time direct messaging with deterministic channel keys (`dm-user1-user2`), eliminating cross-persona crosstalk.
+- **Private AegisBot Streams**: User-isolated AI compliance assistant channels (`dm-aegisbot-${userSlug}`) with instant verification receipts.
+- **Dynamic Meeting Intelligence (`/meetings/[id]`)**: Expansive three-perspective analysis:
+  - **PM View**: Blockers, technical architecture risks, infrastructure dependencies, and mitigations.
+  - **Group View**: Multi-point breakdown of core decisions, consensus points, and milestone commitments.
+  - **Absentee View**: 5-minute catch-up summary for team members who missed the discussion.
+- **Interactive Task Governance (`/tasks`)**: Live status toggling (`pending` ↔ `completed`) with strict user privacy scoping.
+- **Cross-Client Live Sync**: Automatic 3-second background polling keeps chat threads and task updates synchronized across multiple open browser sessions.
+
+---
+
+## 🗺️ Application Routes
+
+| Route | Type | Description |
+| :--- | :--- | :--- |
+| **`/`** | Static | Redirects authenticated users to `/dashboard` or guests to `/login` |
+| **`/login`** | Static | Credential-protected login portal with secure JWT session handling |
+| **`/dashboard`** | Static | Overview metrics, dynamic activity graphs, and priority action items |
+| **`/tasks`** | Static | Personal and team action items table with instant status toggle |
+| **`/meetings`** | Static | Registry of past and scheduled sessions with clickable detail links |
+| **`/meetings/[id]`** | Dynamic | Deep-dive meeting intelligence view (PM, Group, Absentee, Deliverables) |
+| **`/messages`** | Static | Isolated team channels (`#general`, `#meeting-briefs`) and 1-on-1 DMs |
+| **`/projects`** | Static | Enterprise project portfolio and linked deliverables |
+| **`/notifications`** | Static | Filterable security, bot, and task alert center |
+| **`/settings`** | Static | User persona profile, department scope, and GitHub repository links |
+
+---
+
+## 🛠️ Environment Configuration
+
+Create a `.env.local` file in the `frontend` directory:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# Local backend proxy (default)
+NEXT_PUBLIC_PROXY_URL=http://localhost:8000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Hybrid Cloud Deployment (Option 2: Cloudflare Tunnel + Vercel)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+When deploying this frontend to **Vercel** while keeping the privacy proxy running locally:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. **Start the local backend**:
+   ```bash
+   uvicorn proxy:app --host 127.0.0.1 --port 8000 --reload
+   ```
+2. **Launch Cloudflare Tunnel**:
+   ```bash
+   npx cloudflared tunnel --url http://localhost:8000
+   ```
+3. **Set Environment Variable in Vercel**:
+   - Variable Name: `NEXT_PUBLIC_PROXY_URL`
+   - Value: `https://<your-subdomain>.trycloudflare.com`
+4. **Trigger Vercel Redeploy**:
+   - Next.js embeds the tunnel URL into client-side API requests at build time.
 
-## Learn More
+---
 
-To learn more about Next.js, take a look at the following resources:
+## 🚀 Development & Build Commands
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+# Install dependencies
+npm install
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+# Start local development server with Turbopack (http://localhost:3000)
+npm run dev
 
-## Deploy on Vercel
+# Run production build (verifies all 12 App Router routes)
+npm run build
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+# Start production server
+npm run start
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+---
+
+## 🎨 Design System & Accessibility
+
+- **Palette**: Strict monochrome grayscale (`#000000` darks, `#f4f5f7` backgrounds, `#ffffff` card surfaces).
+- **Typography**: Clean sans-serif with tabular numeric figures for dates and metrics.
+- **Icons**: Lucide React with consistent `strokeWidth={1.8}` to `2.2`.
+- **States**: High-contrast hover feedback, disabled states, and responsive layout scaling.
