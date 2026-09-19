@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 import httpx
 from dotenv import load_dotenv
 
-from presidio_analyzer import AnalyzerEngine, PatternRecognizer
+from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 
 # Load environment variables
@@ -121,6 +121,18 @@ provider = NlpEngineProvider(nlp_configuration=nlp_configuration)
 nlp_engine = provider.create_engine()
 analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
 
+# Compound temporal recognizer for complex dates/times (e.g. "Friday at 5:00 PM", "October 24, 2026")
+COMPOUND_DATE_PATTERN = Pattern(
+    name="compound_date_time",
+    regex=r"\b(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|tomorrow|today|yesterday)\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|(?:(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?|\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:,?\s+\d{4})?)(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?)\b",
+    score=0.95,
+)
+COMPOUND_DATE_RECOGNIZER = PatternRecognizer(
+    supported_entity="DATE_TIME",
+    patterns=[COMPOUND_DATE_PATTERN],
+    name="CompoundDateTimeRecognizer",
+)
+
 # Fallback team names for uninitialized environments
 TEAM_MEMBER_NAMES = [
     "Mayank Sachdeva", "Mayank", "D Rohith", "Rohith",
@@ -150,6 +162,13 @@ def get_canonical_names_for_participants(expected_participants: Optional[List[An
                     row = cursor.fetchone()
                     if row:
                         user_ids.append(row[0])
+                    else:
+                        primary = get_primary_name_token(p)
+                        if primary and primary.lower() != p.strip().lower():
+                            cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (primary,))
+                            row2 = cursor.fetchone()
+                            if row2:
+                                user_ids.append(row2[0])
 
     if user_ids:
         placeholders = ",".join("?" for _ in user_ids)
@@ -196,6 +215,13 @@ def get_user_alias_map(expected_participants: Optional[List[Any]] = None) -> Lis
                     row = cursor.fetchone()
                     if row:
                         user_ids.append(row[0])
+                    else:
+                        primary = get_primary_name_token(p)
+                        if primary and primary.lower() != p.strip().lower():
+                            cursor.execute("SELECT id FROM Users WHERE LOWER(canonical_name) = LOWER(?)", (primary,))
+                            row2 = cursor.fetchone()
+                            if row2:
+                                user_ids.append(row2[0])
 
     if user_ids:
         placeholders = ",".join("?" for _ in user_ids)
@@ -238,6 +264,7 @@ def normalize_transcript_aliases(raw_text: str, expected_participants: Optional[
     Phase 4 Dynamic Normalization:
     Queries UserAliases for the expected participants and rewrites any misspelled ASR names
     in the transcript to their canonical_name BEFORE running Presidio.
+    Also handles single-letter initial prefixes e.g. "D Rohith", "D. Rohith" -> "Rohith".
     """
     if not raw_text or not raw_text.strip():
         return raw_text
@@ -252,6 +279,16 @@ def normalize_transcript_aliases(raw_text: str, expected_participants: Optional[
         if pattern.search(normalized):
             normalized = pattern.sub(canonical, normalized)
             rewrites.append(f"'{alias}' -> '{canonical}'")
+
+    # Initial-prefix normalization for participants: e.g. "D Rohith", "D. Rohith" -> "Rohith"
+    target_names = get_canonical_names_for_participants(expected_participants)
+    for name in target_names:
+        primary = get_primary_name_token(name)
+        if len(primary) >= 3:
+            init_pat = re.compile(r"(?<!\w)[A-Za-z]\.?\s+" + re.escape(primary) + r"(?!\w)", re.IGNORECASE)
+            if init_pat.search(normalized):
+                normalized = init_pat.sub(primary, normalized)
+                rewrites.append(f"[Initial] '{primary}' -> '{primary}'")
 
     if rewrites:
         logger.info(f"Dynamic Normalization rewrote {len(rewrites)} ASR aliases: {', '.join(rewrites[:6])}")
@@ -292,12 +329,12 @@ def mask_transcript(
         name="DynamicExpectedParticipantsRecognizer",
     )
 
-    # Analyze text with Presidio using ad_hoc_recognizers
+    # Analyze text with Presidio using ad_hoc_recognizers (including participants and compound dates)
     results = analyzer.analyze(
         text=normalized_text,
         language="en",
-        entities=["PERSON", "ORGANIZATION", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER"],
-        ad_hoc_recognizers=[dynamic_rec],
+        entities=["PERSON", "ORGANIZATION", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER", "IP_ADDRESS", "DATE_TIME"],
+        ad_hoc_recognizers=[dynamic_rec, COMPOUND_DATE_RECOGNIZER],
     )
 
     # Deduplicate overlapping spans: prioritize highest confidence score
@@ -735,7 +772,7 @@ def init_db():
 
     # Pre-seed UserAliases for seed users (ensuring at least 100 phonetic aliases per user)
     custom_name_aliases = {
-        "Rohith": ["D Rohith", "Rohith Dharmavarapu", "Rohith D"],
+        "Rohith": ["D Rohith", "D. Rohith", "Rohith Dharmavarapu", "Rohith D"],
         "Mayank": ["Mayank Sachdeva", "M. Sachdeva"],
         "Sambhav": ["Sambhav Chordia", "S. Chordia"],
         "Sanjeet": ["Bachu Sai Sanjeet", "Sai Sanjeet", "Sanjeet Kumar", "B.S. Sanjeet"],
@@ -1443,11 +1480,13 @@ PROJECT ACCESS CONTROL DIRECTIVE:
 CRITICAL DIRECTIVES:
 1. NEVER alter, translate, or invent bracketed tokens. Retain exact tokens such as [PERSON_1] as the assignee.
 2. DEADLINE ENFORCEMENT: Extract tasks and assign a specific date/time deadline. If not mentioned, assign the deadline strictly as 'unknown'. Do NOT guess, assume, or hallucinate deadlines.
-3. TECHNICAL DETAIL RULE: {tech_rule}
-4. EXPANSIVE MULTI-POINT SUMMARIES: Meeting summaries MUST be comprehensive, thorough, and detailed. Do NOT write single-sentence or abbreviated summaries. Cover every topic, decision, risk, dependency, and next step discussed.
-5. Output STRICTLY a valid JSON object with no preamble, markdown code fences, or conversational text.
-6. You MUST use standard double quotes (") around ALL keys and string values. NEVER use single quotes (').
-7. Follow this EXACT JSON schema:
+3. ASSIGNEE ATTRIBUTION: Distinguish the SPEAKER from the ASSIGNEE. When a speaker delegates a task (e.g. '[PERSON_2], please audit...', '[PERSON_2], can you...', 'I need [PERSON_2] to...'), the assignee is [PERSON_2] (the delegated person), NOT the speaker. If a speaker volunteers ('I will do X'), the assignee is that speaker. If not specified, use 'Unknown'.
+4. ZERO-ACTION RULE: Only extract genuine, explicit action items or tasks assigned in the meeting. If no action items or tasks are discussed or assigned, 'tasks' MUST be an empty array [].
+5. TECHNICAL DETAIL RULE: {tech_rule}
+6. EXPANSIVE MULTI-POINT SUMMARIES: Meeting summaries MUST be comprehensive, thorough, and detailed. Do NOT write single-sentence or abbreviated summaries. Cover every topic, decision, risk, dependency, and next step discussed.
+7. Output STRICTLY a valid JSON object with no preamble, markdown code fences, or conversational text.
+8. You MUST use standard double quotes (") around ALL keys and string values. NEVER use single quotes (').
+9. Follow this EXACT JSON schema:
 {{
   "pm_view": "string (Comprehensive, multi-paragraph and bulleted analysis covering: 1) Executive blockers & operational dependencies, 2) Technical architecture risks and infrastructure constraints, 3) Timeline and delivery milestones, 4) Resource bottlenecks and risk mitigation actions, all deeply contextualized to {meeting_purpose})",
   "group_view": "string (Exhaustive, in-depth multi-point summary covering: 1) Core discussion topics debated, 2) Architecture decisions and technical consensus reached, 3) Tradeoffs evaluated, 4) Agreed deliverables, owner accountability, and project milestones for {meeting_purpose})",
@@ -1617,6 +1656,128 @@ async def query_featherless_ai(
     return fallback
 
 
+def extract_action_items_from_transcript(
+    sanitized_transcript: str,
+    project_id: Union[int, str] = 1,
+) -> List[Dict[str, Any]]:
+    """
+    Extracts genuine action items from meeting transcripts using deterministic pattern matching.
+    Distinguishes the speaker from an explicitly delegated assignee (e.g. 'Pranav, please...').
+    Enforces strict 'unknown' deadline rule if no date/time is mentioned.
+    Returns an empty list if the transcript contains zero action items.
+    """
+    date_pattern = re.compile(
+        r"\b(?:\[DATE_TIME_\d+\]|tomorrow(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|today(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week)|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{4}-\d{2}-\d{2})\b",
+        re.IGNORECASE,
+    )
+
+    NAME_PAT = r"(\[[A-Z0-9_]+\]|[A-Za-z0-9_]+(?:\s+[A-Za-z0-9_]+)?)"
+    tasks = []
+
+    lines = [l.strip() for l in re.split(r"[\r\n]+", sanitized_transcript) if l.strip()]
+    sentences = []
+    for line in lines:
+        spk_match = re.match(r"^(\[[A-Z0-9_]+\]|[A-Za-z0-9_\s]+?)\s*:\s*(.+)$", line)
+        if spk_match:
+            speaker = spk_match.group(1).strip()
+            content = spk_match.group(2).strip()
+            sentences.append((speaker, content))
+        else:
+            sentences.append((None, line))
+
+    for speaker, text in sentences:
+        # Split compound task clauses joined by " and [PERSON] will/must/etc."
+        sub_clauses = re.split(
+            r"\s+and\s+(?=(?:\[[A-Z0-9_]+\]|[A-Za-z0-9_]+)\s+(?:will|must|should|needs?\s+to))",
+            text,
+            flags=re.IGNORECASE,
+        )
+        for clause in sub_clauses:
+            clause = clause.strip()
+            if not clause:
+                continue
+
+            assignee = None
+            task_text = None
+            deadline = "unknown"
+
+            # 1. Delegation patterns: "[PERSON], please..." or "Pranav, please..." or "can you..." or "could you..."
+            deleg_match = re.search(
+                r"(?:^|(?<=\s))" + NAME_PAT + r",\s*(?:please|can you|could you|would you)\s+(.+)",
+                clause,
+                re.IGNORECASE,
+            )
+            if deleg_match:
+                assignee = deleg_match.group(1).strip()
+                task_text = deleg_match.group(2).strip()
+
+            # 2. "I need [PERSON] to..." / "We need [PERSON] to..."
+            if not task_text:
+                need_match = re.search(
+                    r"(?:^|(?<=\s))(?:I|we)\s+need\s+" + NAME_PAT + r"\s+to\s+(.+)",
+                    clause,
+                    re.IGNORECASE,
+                )
+                if need_match:
+                    assignee = need_match.group(1).strip()
+                    task_text = need_match.group(2).strip()
+
+            # 3. "[PERSON] will / must / should / needs to / agreed to..."
+            if not task_text:
+                third_match = re.search(
+                    r"(?:^|(?<=\s))" + NAME_PAT + r"\s+(?:will|must|should|needs?\s+to|agreed\s+to)\s+(.+)",
+                    clause,
+                    re.IGNORECASE,
+                )
+                if third_match:
+                    cand_assignee = third_match.group(1).strip()
+                    cand_task = third_match.group(2).strip()
+                    if cand_assignee.lower() in ("i", "i'll", "we"):
+                        assignee = speaker or "Unknown"
+                    else:
+                        assignee = cand_assignee
+                    task_text = cand_task
+
+            # 4. Volunteering: "I will...", "I'll...", "I am going to..."
+            if not task_text:
+                self_match = re.search(
+                    r"(?:^|(?<=\s))(?:I\s+will|I'll|I\s+am\s+going\s+to)\s+(.+)",
+                    clause,
+                    re.IGNORECASE,
+                )
+                if self_match:
+                    assignee = speaker or "Unknown"
+                    task_text = self_match.group(1).strip()
+
+            if task_text and assignee:
+                d_match = date_pattern.search(clause)
+                if d_match:
+                    deadline = d_match.group(0).strip()
+                    task_text = re.sub(
+                        r"\s*(?:\b(?:by|before|due(?:\s+by)?|until|on|at)\s+)?" + re.escape(deadline) + r"\b",
+                        "",
+                        task_text,
+                        flags=re.IGNORECASE,
+                    )
+
+                clean_task = re.sub(
+                    r"\s*\b(?:by|before|due(?:\s+by)?|until)\s+.*$",
+                    "",
+                    task_text,
+                    flags=re.IGNORECASE,
+                ).strip()
+                clean_task = clean_task.rstrip(".,;! ")
+                if clean_task:
+                    tasks.append({
+                        "assignee": assignee,
+                        "task": clean_task,
+                        "deadline": deadline,
+                        "project_id": project_id,
+                    })
+
+    return tasks
+
+
 def mock_offline_reasoning(
     sanitized_transcript: str,
     meeting_purpose: str = "AegisMeet Sync",
@@ -1633,19 +1794,29 @@ def mock_offline_reasoning(
     - If task has no explicitly mentioned date/time, sets deadline to 'unknown'
     - If share_technical_summary is False, omits deeply technical architecture details
     - Produces expansive, multi-point structured summaries covering all meeting topics, decisions, risks, and next steps.
+    - Zero-Action Rule: If meeting has no actions, returns an empty tasks array rather than fabricating tasks.
+    - Distinguishes speaker from delegated assignee.
     """
     tokens = re.findall(r"\[[A-Z]+_\d+\]", sanitized_transcript)
     primary_person = tokens[0] if tokens else "[PERSON_1]"
     secondary_person = tokens[1] if len(tokens) > 1 else "[PERSON_2]"
 
-    # Date/time detection regex
-    date_pattern = re.compile(
-        r"\b(tomorrow(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|week)|today(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{4}-\d{2}-\d{2})\b",
-        re.IGNORECASE,
-    )
-    all_dates = date_pattern.findall(sanitized_transcript)
-    deadline_1 = all_dates[0].strip() if len(all_dates) > 0 else "unknown"
-    deadline_2 = all_dates[1].strip() if len(all_dates) > 1 else "unknown"
+    tasks = extract_action_items_from_transcript(sanitized_transcript, project_id=project_id)
+
+    if tasks:
+        tasks_summary = "\n".join([f"- {t['assignee']} will {t['task']} (Due: {t['deadline']})" for t in tasks])
+        user_alerts = [
+            {
+                "user": t["assignee"],
+                "alert_type": "action_item",
+                "severity": "high" if t["deadline"] != "unknown" else "medium",
+                "message": f"Action Item for {meeting_purpose}: {t['task']} (Deadline: {t['deadline']})",
+            }
+            for t in tasks
+        ]
+    else:
+        tasks_summary = "- No pending action items or deliverables were assigned in this session."
+        user_alerts = []
 
     if share_technical_summary:
         pm_view = (
@@ -1671,11 +1842,8 @@ def mock_offline_reasoning(
             f"- **Frontend & Communication Channels**: {secondary_person} demonstrated real-time multi-user communication, unread badge synchronization, and isolated direct messaging.\n"
             f"- **Milestone Status**: Core tasks are on schedule for the upcoming release, with high test coverage maintained across all critical execution paths.\n\n"
             f"**Immediate Actionable Next Steps**:\n"
-            f"- {secondary_person} will finalize dashboard integration and QA test signoff for {project_name}.\n"
-            f"- {primary_person} will complete security audit documentation and verify cross-origin tunnel configurations."
+            f"{tasks_summary}"
         )
-        task1_title = f"Complete {project_name} dashboard and proxy integration"
-        task2_title = f"Review {project_name} security audit logs and verify zero-leak compliance"
     else:
         pm_view = (
             f"### Executive overview & Strategic Alignment — {meeting_purpose} ({project_name})\n\n"
@@ -1696,44 +1864,17 @@ def mock_offline_reasoning(
             f"Brief strategic synchronization convened regarding {meeting_purpose} ({project_name}). Leadership and team leads reviewed overall project health and organizational milestones.\n\n"
             f"**Summary of Discussion**:\n"
             f"- High-level operational progress reviewed and approved.\n"
-            f"- Deliverables and responsibilities delegated to {secondary_person} and {primary_person}.\n"
-            f"- Next milestone review scheduled for the upcoming operating cycle."
+            f"- Next milestone review scheduled for the upcoming operating cycle.\n\n"
+            f"**Immediate Actionable Next Steps**:\n"
+            f"{tasks_summary}"
         )
-        task1_title = f"Coordinate {project_name} team deliverables and project updates"
-        task2_title = f"Prepare {project_name} executive briefing and status report"
 
     return {
         "pm_view": pm_view,
         "group_view": group_view,
         "absent_view": absent_view,
-        "tasks": [
-            {
-                "assignee": secondary_person,
-                "task": task1_title,
-                "deadline": deadline_1,
-                "project_id": project_id,
-            },
-            {
-                "assignee": primary_person,
-                "task": task2_title,
-                "deadline": deadline_2,
-                "project_id": project_id,
-            },
-        ],
-        "user_alerts": [
-            {
-                "user": secondary_person,
-                "alert_type": "action_item",
-                "severity": "high",
-                "message": f"Action Item for {meeting_purpose}: {task1_title} (Deadline: {deadline_1})",
-            },
-            {
-                "user": primary_person,
-                "alert_type": "action_item",
-                "severity": "medium",
-                "message": f"Assigned item for {meeting_purpose}: {task2_title} (Deadline: {deadline_2})",
-            },
-        ],
+        "tasks": tasks,
+        "user_alerts": user_alerts,
     }
 
 

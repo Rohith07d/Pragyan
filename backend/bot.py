@@ -576,9 +576,13 @@ class AegisMeetBot:
                             // 1. Filter out clock timestamps e.g. "9:24", "09:25", "9:26 PM"
                             if (/^\\d{1,2}:\\d{2}(\\s*(am|pm))?$/i.test(lower)) return true;
 
-                            // 2. Filter out known UI strings
+                            // 2. Filter out known UI strings (exact match or label + shortcut/counter e.g. "People (4)", "Turn on captions (c)")
                             for (const item of UI_BLACKLIST) {
-                                if (lower === item || lower.includes(item)) return true;
+                                if (lower === item) return true;
+                                if (lower.startsWith(item)) {
+                                    const remainder = lower.slice(item.length).trim();
+                                    if (!remainder || /^(\\([a-z0-9\\s]+\\))?[\\.\\?!]?$/i.test(remainder)) return true;
+                                }
                             }
 
                             // 3. Filter out language menu lists
