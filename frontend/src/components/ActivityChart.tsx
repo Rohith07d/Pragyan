@@ -38,6 +38,8 @@ interface ActivityChartProps {
   selectedDay?: string | null;
   onSelectDay?: (day: string | null) => void;
   completedTasksBonus?: number;
+  tasks?: any[];
+  meetings?: any[];
 }
 
 export default function ActivityChart({
@@ -46,6 +48,8 @@ export default function ActivityChart({
   selectedDay = null,
   onSelectDay,
   completedTasksBonus = 0,
+  tasks = [],
+  meetings = [],
 }: ActivityChartProps) {
   const [internalTimeframe, setInternalTimeframe] = useState<"this_week" | "last_week">(timeframe);
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
@@ -53,16 +57,31 @@ export default function ActivityChart({
   const activeTf = onTimeframeChange ? timeframe : internalTimeframe;
   const rawData = ACTIVITY_DATA[activeTf];
 
-  // Apply dynamic bonus points to Friday when tasks are completed in real time
+  // Dynamically compute activity counts from live tasks & meetings if available
   const data = rawData.map((d) => {
-    if (d.day === "Fri" && completedTasksBonus > 0) {
-      return {
-        ...d,
-        value: d.value + completedTasksBonus * 5,
-        tasksCompleted: d.tasksCompleted + completedTasksBonus,
-      };
-    }
-    return d;
+    const dayKey = d.day.toLowerCase();
+    const dayTasks = tasks.filter((t: any) => {
+      const dl = (t.deadline || "").toLowerCase();
+      return dl.includes(dayKey) || dl.includes(d.fullDay.toLowerCase()) ||
+        (dayKey === "mon" && dl.includes("today")) ||
+        (dayKey === "tue" && dl.includes("tomorrow"));
+    });
+    const completedTasks = dayTasks.filter((t: any) => t.status === "completed").length;
+    const dayMeetings = meetings.filter((m: any) => {
+      const st = (m.scheduled_time || "").toLowerCase();
+      return st.includes(dayKey) || (dayKey === "mon" && st.includes("today"));
+    }).length;
+
+    const dynamicValue = tasks.length > 0 || meetings.length > 0
+      ? Math.min(85, Math.max(20, d.value + (completedTasks * 8) + (dayMeetings * 10) + (completedTasksBonus > 0 && d.day === "Fri" ? completedTasksBonus * 5 : 0)))
+      : d.value;
+
+    return {
+      ...d,
+      value: dynamicValue,
+      meetings: dayMeetings > 0 ? dayMeetings : d.meetings,
+      tasksCompleted: completedTasks > 0 ? completedTasks : (d.day === "Fri" ? d.tasksCompleted + completedTasksBonus : d.tasksCompleted),
+    };
   });
 
   const height = 150;

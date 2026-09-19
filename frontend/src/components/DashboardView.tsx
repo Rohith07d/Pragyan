@@ -57,8 +57,8 @@ export default function DashboardView() {
   const [taskStatusFilter, setTaskStatusFilter] = useState<"all" | "completed" | "pending">("all");
   const [showProductivityModal, setShowProductivityModal] = useState(false);
   const [chartTimeframe, setChartTimeframe] = useState<"this_week" | "last_week">("this_week");
-  const [messagesCount, setMessagesCount] = useState<number>(34);
-  const [unreadMessagesCount, setUnreadMessagesCount] = useState<number>(5);
+  const [messagesCount, setMessagesCount] = useState<number>(0);
+  const [unreadMessagesCount, setUnreadMessagesCount] = useState<number>(0);
 
   // Meeting modal drawer state
   const [showMeetModal, setShowMeetModal] = useState(false);
@@ -139,8 +139,8 @@ export default function DashboardView() {
       setBotStatus(bStatus);
       setDashboardData(uDash);
       if (uList && uList.length > 0) setAllUsers(uList);
-      if (msgList && msgList.length > 0) {
-        setMessagesCount(Math.max(msgList.length, 34));
+      if (msgList) {
+        setMessagesCount(msgList.length);
       }
     } catch {
       // ignore
@@ -221,44 +221,20 @@ export default function DashboardView() {
     }
   };
 
-  // Metrics computation matching reference layout
+  // Metrics computation matching live database state
   const completedTasksCount = tasks.filter((t) => t.status === "completed").length;
-  const tasksCompletedDisplay = completedTasksCount > 0 ? completedTasksCount : 1;
-  const activeProjectsDisplay = projects.length > 0 ? projects.length : 4;
-  // Dynamic productivity: 82% when 1 completed task, scales up/down as tasks are checked
-  const productivityDisplay = Math.min(100, Math.max(50, 75 + completedTasksCount * 7));
+  const totalTasksCount = tasks.length;
+  const tasksCompletedDisplay = completedTasksCount;
+  const activeProjectsDisplay = projects.length;
+  const dueTodayTasksCount = tasks.filter((t) => (t.deadline || "").toLowerCase().includes("today")).length;
+  const pendingTasksCount = tasks.filter((t) => t.status !== "completed").length;
 
-  // Build Recent Tasks table items (combines live database tasks with reference items for visual completeness)
-  const defaultReferenceTasks = [
-    {
-      id: -1,
-      task: "Update dashboard UI",
-      project_name: "Workspace App",
-      deadline: "12 Aug",
-      status: "completed" as const,
-    },
-    {
-      id: -2,
-      task: "Fix login issue",
-      project_name: "Auth System",
-      deadline: "11 Aug",
-      status: "in_progress" as const,
-    },
-    {
-      id: -3,
-      task: "Design new icons",
-      project_name: "UI Kit",
-      deadline: "10 Aug",
-      status: "pending" as const,
-    },
-    {
-      id: -4,
-      task: "Client feedback review",
-      project_name: "Project A",
-      deadline: "09 Aug",
-      status: "completed" as const,
-    },
-  ];
+  const productivityDisplay = totalTasksCount > 0
+    ? Math.round((completedTasksCount / totalTasksCount) * 100)
+    : 100;
+  const productivitySubtitle = totalTasksCount > 0
+    ? `${completedTasksCount} of ${totalTasksCount} completed`
+    : "All tasks completed";
 
   // Multi-tier filtering for Recent Tasks table:
   // 1. Filter tasks if admin selected a specific user
@@ -294,16 +270,13 @@ export default function DashboardView() {
     }
   }
 
-  const recentTasks =
-    filtered.length > 0
-      ? filtered.slice(0, 6).map((t) => ({
-          id: t.id,
-          task: t.task,
-          project_name: t.project_name || "Aegis Core",
-          deadline: t.deadline || "12 Aug",
-          status: t.status || "pending",
-        }))
-      : (taskStatusFilter === "all" && !selectedDayFilter ? defaultReferenceTasks : []);
+  const recentTasks = filtered.slice(0, 8).map((t) => ({
+    id: t.id,
+    task: t.task,
+    project_name: t.project_name || (t.project_id === 2 ? "Project B (Confidential)" : "Project A (Main)"),
+    deadline: t.deadline || "unknown",
+    status: t.status || "pending",
+  }));
 
   const renderStatusBadge = (status: string) => {
     if (status === "completed") {
@@ -343,8 +316,7 @@ export default function DashboardView() {
           {/* Welcome Section matching reference image */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
-              <p className="text-xs text-gray-500 font-medium">Welcome section</p>
-              <h1 className="text-2xl font-bold text-gray-900 tracking-tight mt-0.5">
+              <h1 className="text-2xl font-bold text-gray-900 tracking-tight">
                 Nice to see you again, {user?.canonical_name || user?.name || "User"}
               </h1>
               <p className="text-xs text-gray-500 mt-0.5">Here's your workspace overview</p>
@@ -466,7 +438,11 @@ export default function DashboardView() {
                 {tasksCompletedDisplay}
               </div>
               <p className="text-[11px] text-gray-400 mt-1">
-                {taskStatusFilter === "completed" ? "Showing completed • Click to reset" : "+12% this week"}
+                {taskStatusFilter === "completed"
+                  ? "Showing completed • Click to reset"
+                  : totalTasksCount > 0
+                    ? `${Math.round((completedTasksCount / totalTasksCount) * 100)}% completion rate`
+                    : "No tasks assigned"}
               </p>
             </div>
 
@@ -483,7 +459,11 @@ export default function DashboardView() {
               <div className="text-3xl font-bold text-white tracking-tight mt-2">
                 {activeProjectsDisplay}
               </div>
-              <p className="text-[11px] text-gray-400 mt-1">2 due today</p>
+              <p className="text-[11px] text-gray-400 mt-1">
+                {dueTodayTasksCount > 0
+                  ? `${dueTodayTasksCount} due today`
+                  : `${pendingTasksCount} pending task${pendingTasksCount !== 1 ? "s" : ""}`}
+              </p>
             </div>
 
             {/* Card 3: Messages */}
@@ -499,7 +479,9 @@ export default function DashboardView() {
               <div className="text-3xl font-bold text-white tracking-tight mt-2">
                 {messagesCount}
               </div>
-              <p className="text-[11px] text-gray-400 mt-1">{unreadMessagesCount} unread</p>
+              <p className="text-[11px] text-gray-400 mt-1">
+                {unreadMessagesCount > 0 ? `${unreadMessagesCount} unread` : `${messagesCount} messages logged`}
+              </p>
             </div>
 
             {/* Card 4: Productivity */}
@@ -515,7 +497,7 @@ export default function DashboardView() {
               <div className="text-3xl font-bold text-white tracking-tight mt-2">
                 {productivityDisplay}%
               </div>
-              <p className="text-[11px] text-gray-400 mt-1">+5% improvement</p>
+              <p className="text-[11px] text-gray-400 mt-1">{productivitySubtitle}</p>
             </div>
           </div>
 
@@ -544,6 +526,8 @@ export default function DashboardView() {
               selectedDay={selectedDayFilter}
               onSelectDay={setSelectedDayFilter}
               completedTasksBonus={completedTasksCount > 1 ? completedTasksCount - 1 : 0}
+              tasks={tasks}
+              meetings={meetings}
             />
           </div>
 
@@ -601,8 +585,15 @@ export default function DashboardView() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800/50">
-                  {recentTasks.map((t, idx) => (
-                    <tr key={idx} className="group hover:bg-zinc-800/30 transition-colors">
+                  {recentTasks.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="py-8 text-center text-xs text-zinc-500">
+                        No recent tasks found.
+                      </td>
+                    </tr>
+                  ) : (
+                    recentTasks.map((t, idx) => (
+                      <tr key={idx} className="group hover:bg-zinc-800/30 transition-colors">
                       <td className="py-3 text-xs font-medium text-gray-200 group-hover:text-white">
                         <div className="flex items-center gap-2.5">
                           {t.id > 0 && (
@@ -637,7 +628,8 @@ export default function DashboardView() {
                         )}
                       </td>
                     </tr>
-                  ))}
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>

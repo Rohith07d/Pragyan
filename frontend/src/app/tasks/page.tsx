@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import React, { useState, useEffect, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
 import {
@@ -19,14 +19,21 @@ import {
 } from "@/lib/api";
 import { Plus, Trash2, CheckCircle2, Clock, X, AlertCircle, Shield, User, FolderLock, Users } from "lucide-react";
 
-export default function TasksPage() {
+function TasksPageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const queryProjectId = searchParams.get("project_id") || searchParams.get("projectId") || searchParams.get("project");
+
+  const initialPid: number | "all" = queryProjectId
+    ? (queryProjectId === "all" ? "all" : (parseInt(queryProjectId, 10) || 1))
+    : 1;
+
   const [user, setUser] = useState<AuthUser | null>(null);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [usersList, setUsersList] = useState<AuthUser[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<number | "all">(1);
+  const [activeProjectId, setActiveProjectId] = useState<number | "all">(initialPid);
   const [filter, setFilter] = useState<"all" | "completed" | "pending">("all");
   const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
   const [isLoading, setIsLoading] = useState(true);
@@ -36,7 +43,7 @@ export default function TasksPage() {
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [newTaskDeadline, setNewTaskDeadline] = useState("");
   const [newTaskAssigneeId, setNewTaskAssigneeId] = useState<number | undefined>(undefined);
-  const [newTaskProjectId, setNewTaskProjectId] = useState<number>(1);
+  const [newTaskProjectId, setNewTaskProjectId] = useState<number>(typeof initialPid === "number" ? initialPid : 1);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // 1. Initial user & projects setup
@@ -56,8 +63,16 @@ export default function TasksPage() {
         ]);
         if (pData && pData.length > 0) {
           setProjects(pData);
-          setActiveProjectId(pData[0].id);
-          setNewTaskProjectId(pData[0].id);
+          if (queryProjectId) {
+            const parsed = queryProjectId === "all" ? "all" : parseInt(queryProjectId, 10);
+            if (parsed === "all" || pData.some((p) => p.id === parsed)) {
+              setActiveProjectId(parsed);
+              if (typeof parsed === "number") setNewTaskProjectId(parsed);
+              return;
+            }
+          }
+          setActiveProjectId((prev) => (pData.some((p) => p.id === prev) ? prev : pData[0].id));
+          setNewTaskProjectId((prev) => (pData.some((p) => p.id === prev) ? prev : pData[0].id));
         }
         if (uData && uData.length > 0) {
           setUsersList(uData);
@@ -67,7 +82,20 @@ export default function TasksPage() {
       }
     };
     initProjectsAndUsers();
-  }, [router]);
+  }, [router, queryProjectId]);
+
+  // Sync state whenever query param changes externally
+  useEffect(() => {
+    if (queryProjectId) {
+      const parsed = queryProjectId === "all" ? "all" : parseInt(queryProjectId, 10);
+      if (parsed === "all" || !isNaN(parsed)) {
+        setActiveProjectId(parsed);
+        if (typeof parsed === "number") {
+          setNewTaskProjectId(parsed);
+        }
+      }
+    }
+  }, [queryProjectId]);
 
   // 2. React state tied directly to activeProjectId: clear old tasks immediately & fetch isolated data
   useEffect(() => {
@@ -209,7 +237,10 @@ export default function TasksPage() {
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={() => setActiveProjectId("all")}
+                    onClick={() => {
+                      setActiveProjectId("all");
+                      router.replace("/tasks?project_id=all", { scroll: false });
+                    }}
                     className={`px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
                       activeProjectId === "all"
                         ? "bg-white text-black shadow-xs"
@@ -228,6 +259,7 @@ export default function TasksPage() {
                         onClick={() => {
                           setActiveProjectId(p.id);
                           setNewTaskProjectId(p.id);
+                          router.replace(`/tasks?project_id=${p.id}`, { scroll: false });
                         }}
                         className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors border ${
                           isSelected
@@ -588,5 +620,13 @@ export default function TasksPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function TasksPage() {
+  return (
+    <Suspense fallback={<div className="p-8 text-center text-xs text-gray-500">Loading workspace...</div>}>
+      <TasksPageContent />
+    </Suspense>
   );
 }

@@ -111,8 +111,12 @@ export default function ProjectsPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {displayProjects.map((p) => {
               const projectTasks = tasks.filter(
-                (t) => (t.project_name || "Aegis Core") === p.name
+                (t) => t.project_id === p.id || (t.project_name || "").toLowerCase() === p.name.toLowerCase()
               );
+              const pendingCount = projectTasks.filter((t) => t.status !== "completed").length;
+              const completedCount = projectTasks.filter((t) => t.status === "completed").length;
+              const isConfidential = p.id === 2 || p.name.includes("Confidential");
+
               return (
                 <div
                   key={p.id}
@@ -121,11 +125,20 @@ export default function ProjectsPage() {
                   <div>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-xl bg-zinc-800 flex items-center justify-center text-white">
+                        <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-white ${
+                          isConfidential ? "bg-red-950 border border-red-800/60 text-red-300" : "bg-zinc-800"
+                        }`}>
                           <Folder className="w-5 h-5" />
                         </div>
                         <div>
-                          <h3 className="text-sm font-bold text-white">{p.name}</h3>
+                          <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
+                            {p.name}
+                            {isConfidential && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 border border-red-500/30">
+                                Confidential
+                              </span>
+                            )}
+                          </h3>
                           <p className="text-[11px] text-gray-400">ID: #{p.id}</p>
                         </div>
                       </div>
@@ -135,20 +148,28 @@ export default function ProjectsPage() {
                     </div>
 
                     <div className="mt-6 space-y-2">
-                      <div className="text-[11px] font-medium text-gray-400 uppercase tracking-wider">
-                        Linked Tasks ({projectTasks.length})
+                      <div className="text-[11px] font-medium text-gray-400 uppercase tracking-wider flex items-center justify-between">
+                        <span>Linked Tasks ({projectTasks.length})</span>
+                        <span className="text-[10px] text-zinc-500 lowercase">
+                          {pendingCount} pending • {completedCount} done
+                        </span>
                       </div>
                       {projectTasks.length === 0 ? (
                         <p className="text-xs text-zinc-500 italic">No tasks currently assigned to this project.</p>
                       ) : (
                         <div className="space-y-1.5">
-                          {projectTasks.slice(0, 3).map((t) => (
+                          {projectTasks.slice(0, 4).map((t) => (
                             <div
                               key={t.id}
                               className="flex items-center justify-between text-xs py-1.5 px-2.5 rounded-lg bg-zinc-900/60 text-zinc-300"
                             >
-                              <span>{t.task}</span>
-                              <span className="text-[10px] text-zinc-500">{t.deadline}</span>
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                  t.status === "completed" ? "bg-emerald-400" : "bg-amber-400"
+                                }`}></span>
+                                <span className="truncate">{t.task}</span>
+                              </div>
+                              <span className="text-[10px] text-zinc-500 shrink-0 ml-2">{t.deadline}</span>
                             </div>
                           ))}
                         </div>
@@ -157,12 +178,15 @@ export default function ProjectsPage() {
                   </div>
 
                   <div className="mt-6 pt-4 border-t border-zinc-800 flex items-center justify-between text-xs text-gray-400">
-                    <span>Due: 2 due today</span>
+                    <span>
+                      {pendingCount > 0 ? `${pendingCount} pending task${pendingCount > 1 ? "s" : ""}` : "All tasks completed"}
+                    </span>
                     <button
-                      onClick={() => router.push("/tasks")}
-                      className="text-white hover:underline text-xs"
+                      onClick={() => router.push(`/tasks?project_id=${p.id}`)}
+                      className="text-white hover:underline text-xs font-semibold cursor-pointer flex items-center gap-1"
                     >
-                      Manage tasks →
+                      <span>Manage tasks</span>
+                      <span>→</span>
                     </button>
                   </div>
                 </div>
